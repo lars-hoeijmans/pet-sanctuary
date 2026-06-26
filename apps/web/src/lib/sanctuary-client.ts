@@ -11,9 +11,9 @@ import type {
   WorldEvent
 } from "./contracts";
 
-const API_BASE_URL =
+export const API_BASE_URL =
   process.env.NEXT_PUBLIC_SANCTUARY_API_URL?.replace(/\/$/, "") ?? "http://localhost:3001";
-const SOCKET_URL =
+export const SOCKET_URL =
   process.env.NEXT_PUBLIC_SANCTUARY_SOCKET_URL?.replace(/\/$/, "") ??
   `${API_BASE_URL}/living-room`;
 

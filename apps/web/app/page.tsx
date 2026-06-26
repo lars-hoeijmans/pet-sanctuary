@@ -1,11 +1,5 @@
-import { LivingRoomKernel } from "@/components/LivingRoomKernel";
-import { ManagerConsole } from "@/components/ManagerConsole";
+import { AppClient } from "./AppClient";
 
 export default function Page() {
-  return (
-    <>
-      <LivingRoomKernel />
-      <ManagerConsole />
-    </>
-  );
+  return <AppClient />;
 }
