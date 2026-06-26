@@ -98,6 +98,29 @@ export async function resetRoomToSeed(roomId = ROOM_ID): Promise<RoomSnapshot> {
   return normalizeRoomResponse(await response.json());
 }
 
+export async function triggerMeaningfulRoomEvent(roomId = ROOM_ID): Promise<RoomSnapshot> {
+  const response = await fetch(`${API_BASE_URL}/rooms/${encodeURIComponent(roomId)}/events`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json"
+    },
+    body: JSON.stringify({
+      summary: "A developer posted a trace-polish task for the whole room.",
+      significance: "high",
+      metadata: {
+        source: "placeholder-ui"
+      }
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error(`Room event request failed with ${response.status}`);
+  }
+
+  return normalizeRoomResponse(await response.json());
+}
+
 export function connectRoomSocket(handlers: LiveHandlers, roomId = ROOM_ID): Socket {
   const socket = io(SOCKET_URL, {
     transports: ["websocket", "polling"],

@@ -1,6 +1,7 @@
 import {
   type AgentObservation,
   type AvailableAction,
+  type CreateRoomEventRequest,
   type Pet,
   PetActionSchema,
   type PetAction,
@@ -19,6 +20,16 @@ export type ValidationResult =
 export type ApplyActionResult =
   | { ok: true; snapshot: RoomSnapshot; event: WorldEvent }
   | { ok: false; snapshot: RoomSnapshot; errors: string[]; event: WorldEvent };
+
+export interface ProcessWorldEventOptions {
+  chooseAction?: (observation: AgentObservation) => PetAction | null;
+}
+
+export interface ProcessWorldEventResult {
+  snapshot: RoomSnapshot;
+  triggeringEvent: WorldEvent;
+  events: WorldEvent[];
+}
 
 export const SEED_ROOM_ID = "living-room";
 
@@ -176,6 +187,70 @@ export function createSeedRoomSnapshot(timestamp: string = new Date().toISOStrin
   ];
 
   return RoomSnapshotSchema.parse({ room, pets, objects, events });
+}
+
+export function createRoomNoticeEvent(
+  snapshot: RoomSnapshot,
+  request: CreateRoomEventRequest,
+  timestamp: string = new Date().toISOString()
+): WorldEvent {
+  return createEvent({
+    snapshot,
+    type: "RoomNotice",
+    timestamp,
+    actorPetId: null,
+    targetPetId: request.targetPetId ?? null,
+    targetId: request.targetId ?? null,
+    payload: {
+      ...request.metadata,
+      summary: request.summary
+    },
+    visibility: "room",
+    significance: request.significance
+  });
+}
+
+export function processWorldEvent(
+  snapshot: RoomSnapshot,
+  event: WorldEvent,
+  timestamp: string = new Date().toISOString(),
+  options: ProcessWorldEventOptions = {}
+): ProcessWorldEventResult {
+  const chooseAction = options.chooseAction ?? chooseDeterministicPetAction;
+  const events: WorldEvent[] = [];
+  let next = snapshot;
+
+  if (!next.events.some((existing) => existing.id === event.id)) {
+    next = appendEvent(next, event);
+    events.push(event);
+  }
+
+  for (const pet of next.pets.filter((candidate) => candidate.status !== "paused")) {
+    const observation = buildObservation(next, pet.id, event);
+    const perceived = createPerceptionEvent(next, pet, event, observation.responseLevel, timestamp);
+    next = appendEvent(next, perceived);
+    events.push(perceived);
+
+    if (!canProposeAction(observation.responseLevel)) {
+      continue;
+    }
+
+    const action = chooseAction(observation);
+    if (!action) {
+      continue;
+    }
+
+    const result = applyPetAction(next, pet.id, action, timestamp);
+    const annotatedEvent = annotateTriggeredResponse(result.event, event, observation.responseLevel);
+    next = replaceEvent(result.snapshot, annotatedEvent);
+    events.push(annotatedEvent);
+  }
+
+  return {
+    snapshot: RoomSnapshotSchema.parse(next),
+    triggeringEvent: event,
+    events
+  };
 }
 
 export function buildObservation(
@@ -635,6 +710,65 @@ function createEvent(input: {
     visibility: input.visibility,
     significance: input.significance
   };
+}
+
+function createPerceptionEvent(
+  snapshot: RoomSnapshot,
+  pet: Pet,
+  triggeringEvent: WorldEvent,
+  responseLevel: ResponseLevel,
+  timestamp: string
+): WorldEvent {
+  return createEvent({
+    snapshot,
+    type: "PetObserved",
+    timestamp,
+    actorPetId: pet.id,
+    targetId: triggeringEvent.id,
+    payload: {
+      triggeringEventId: triggeringEvent.id,
+      triggeringEventType: triggeringEvent.type,
+      responseLevel,
+      summary: `${pet.name} perceived ${eventLabel(triggeringEvent)} as ${responseLevel}.`
+    },
+    visibility: "system",
+    significance: canProposeAction(responseLevel) ? "medium" : "low"
+  });
+}
+
+function annotateTriggeredResponse(
+  event: WorldEvent,
+  triggeringEvent: WorldEvent,
+  responseLevel: ResponseLevel
+): WorldEvent {
+  return {
+    ...event,
+    payload: {
+      ...event.payload,
+      triggeringEventId: triggeringEvent.id,
+      triggeringEventType: triggeringEvent.type,
+      responseLevel
+    }
+  };
+}
+
+function replaceEvent(snapshot: RoomSnapshot, event: WorldEvent): RoomSnapshot {
+  return RoomSnapshotSchema.parse({
+    ...snapshot,
+    events: snapshot.events.map((existing) => (existing.id === event.id ? event : existing))
+  });
+}
+
+function canProposeAction(responseLevel: ResponseLevel): boolean {
+  return (
+    responseLevel === "ambient_reaction" ||
+    responseLevel === "social_response" ||
+    responseLevel === "task_action"
+  );
+}
+
+function eventLabel(event: WorldEvent): string {
+  return typeof event.payload.summary === "string" ? event.payload.summary : event.type;
 }
 
 function availableActionsForPet(pet: Pet): AvailableAction[] {

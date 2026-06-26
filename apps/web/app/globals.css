@@ -156,6 +156,12 @@ h1 {
   transform: scale(0.96);
 }
 
+.control-button:disabled {
+  cursor: wait;
+  opacity: 0.68;
+  transform: none;
+}
+
 .icon-button {
   display: grid;
   width: 42px;

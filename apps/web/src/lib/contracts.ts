@@ -53,6 +53,7 @@ export type WorldEvent = {
   id: string;
   type:
     | "RoomSeeded"
+    | "RoomNotice"
     | "SimulationTick"
     | "SimulationPaused"
     | "SimulationResumed"

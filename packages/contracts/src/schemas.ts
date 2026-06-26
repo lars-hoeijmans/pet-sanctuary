@@ -98,6 +98,7 @@ export type WorldObject = z.infer<typeof WorldObjectSchema>;
 
 export const WorldEventTypeSchema = z.enum([
   "RoomSeeded",
+  "RoomNotice",
   "SimulationTick",
   "PetObserved",
   "PetMoved",
@@ -247,6 +248,19 @@ export const ServerWebSocketEventSchema = z.discriminatedUnion("type", [
   })
 ]);
 export type ServerWebSocketEvent = z.infer<typeof ServerWebSocketEventSchema>;
+
+export const CreateRoomEventRequestSchema = z.object({
+  summary: z
+    .string()
+    .min(1)
+    .max(240)
+    .default("A meaningful room notice asks every active pet to respond."),
+  significance: z.enum(["low", "medium", "high"]).default("high"),
+  targetPetId: z.string().min(1).nullable().optional(),
+  targetId: z.string().min(1).nullable().optional(),
+  metadata: z.record(z.unknown()).default({})
+});
+export type CreateRoomEventRequest = z.infer<typeof CreateRoomEventRequestSchema>;
 
 export const ClientWebSocketEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("request_snapshot"), roomId: z.string().min(1) }),

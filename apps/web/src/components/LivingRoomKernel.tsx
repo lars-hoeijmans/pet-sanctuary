@@ -3,6 +3,7 @@
 import {
   Activity,
   CircleAlert,
+  Megaphone,
   Pause,
   Play,
   RotateCcw,
@@ -11,19 +12,21 @@ import {
   WifiOff
 } from "lucide-react";
 import type { CSSProperties } from "react";
-import { useEffect, useMemo, useReducer } from "react";
+import { useEffect, useMemo, useReducer, useState } from "react";
 import type { Pet, RoomObject, WorldEvent } from "@/lib/contracts";
 import {
   connectRoomSocket,
   fetchRoomSnapshot,
   resetRoomToSeed,
-  setSimulationPaused
+  setSimulationPaused,
+  triggerMeaningfulRoomEvent
 } from "@/lib/sanctuary-client";
 import { SEED_SNAPSHOT } from "@/lib/seed";
 import { createInitialState, sanctuaryReducer } from "@/lib/state";
 
 export function LivingRoomKernel() {
   const [state, dispatch] = useReducer(sanctuaryReducer, SEED_SNAPSHOT, createInitialState);
+  const [triggeringEvent, setTriggeringEvent] = useState(false);
 
   const selectedPet = useMemo(
     () => state.snapshot.pets.find((pet) => pet.id === state.selectedPetId) ?? state.snapshot.pets[0],
@@ -118,6 +121,23 @@ export function LivingRoomKernel() {
     }
   }
 
+  async function handleTriggerRoomEvent() {
+    setTriggeringEvent(true);
+
+    try {
+      const snapshot = await triggerMeaningfulRoomEvent();
+      dispatch({ type: "apply_snapshot", snapshot, source: "api" });
+    } catch (error) {
+      dispatch({
+        type: "socket_status",
+        status: state.socket,
+        message: readErrorMessage(error)
+      });
+    } finally {
+      setTriggeringEvent(false);
+    }
+  }
+
   return (
     <main className="kernel-shell">
       <header className="kernel-topbar">
@@ -133,6 +153,16 @@ export function LivingRoomKernel() {
 
         <div className="topbar-actions" aria-label="Simulation controls">
           <StatusPill state={state.socket} source={state.source} />
+          <button
+            className="control-button"
+            type="button"
+            onClick={handleTriggerRoomEvent}
+            disabled={triggeringEvent}
+            title="Trigger a meaningful room event"
+          >
+            <Megaphone size={17} />
+            <span>{triggeringEvent ? "Triggering" : "Trigger Event"}</span>
+          </button>
           <button
             className="control-button"
             type="button"

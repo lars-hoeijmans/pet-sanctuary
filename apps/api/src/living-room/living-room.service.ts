@@ -1,10 +1,12 @@
 import { Inject, Injectable, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import {
+  createRoomNoticeEvent,
   pauseSimulation,
+  processWorldEvent,
   resumeSimulation,
   runDeterministicTick
 } from "@pet-sanctuary/domain";
-import type { RoomSnapshot, WorldEvent } from "@pet-sanctuary/contracts";
+import type { CreateRoomEventRequest, RoomSnapshot, WorldEvent } from "@pet-sanctuary/contracts";
 import { LIVING_ROOM_REPOSITORY } from "./living-room.repository.js";
 import type { LivingRoomRepository } from "./living-room.repository.js";
 import { DEFAULT_MAIN_ROOM_SEED } from "./in-memory-living-room.repository.js";
@@ -115,6 +117,24 @@ export class LivingRoomService implements OnModuleInit, OnModuleDestroy {
     }
 
     return { snapshot: next, simulation };
+  }
+
+  async injectRoomEvent(request: CreateRoomEventRequest): Promise<RoomResponse> {
+    const snapshot = await this.repository.loadMainRoom();
+    const timestamp = new Date().toISOString();
+    const event = createRoomNoticeEvent(snapshot, request, timestamp);
+    const result = processWorldEvent(snapshot, event, timestamp);
+    await this.repository.saveMainRoom(result.snapshot);
+
+    const simulation = this.getSimulationStatus(result.snapshot);
+    for (const createdEvent of result.events) {
+      await this.publish({ snapshot: result.snapshot, event: createdEvent, simulation });
+    }
+
+    return {
+      snapshot: result.snapshot,
+      simulation
+    };
   }
 
   getSimulationStatus(snapshot: RoomSnapshot): SimulationStatus {

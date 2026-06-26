@@ -3,7 +3,9 @@ import {
   applyPetAction,
   buildObservation,
   classifyResponseLevel,
+  createRoomNoticeEvent,
   createSeedRoomSnapshot,
+  processWorldEvent,
   runDeterministicTick
 } from "./kernel.js";
 
@@ -67,5 +69,105 @@ describe("Living Room Kernel domain", () => {
     expect(next.events.length).toBeGreaterThan(snapshot.events.length);
     expect(next.events.some((event) => event.type === "SimulationTick")).toBe(true);
     expect(next.events.every((event) => event.roomId === snapshot.room.id)).toBe(true);
+  });
+
+  it("processes a high-significance room event through every active pet perception", () => {
+    const snapshot = createSeedRoomSnapshot("2026-06-26T12:00:00.000Z");
+    const notice = createRoomNoticeEvent(
+      snapshot,
+      {
+        summary: "A developer dropped a trace-polish task into the room.",
+        significance: "high",
+        metadata: { source: "test" }
+      },
+      "2026-06-26T12:02:00.000Z"
+    );
+
+    const result = processWorldEvent(snapshot, notice, "2026-06-26T12:02:00.000Z");
+
+    const perceptions = result.events.filter((event) => event.type === "PetObserved");
+    const actionEvents = result.events.filter((event) =>
+      ["PetMoved", "PetSaid", "PetOfferedHelp", "PetStartedWork"].includes(event.type)
+    );
+
+    expect(result.events[0]).toMatchObject({
+      id: notice.id,
+      type: "RoomNotice",
+      significance: "high"
+    });
+    expect(perceptions).toHaveLength(snapshot.pets.length);
+    expect(new Set(perceptions.map((event) => event.actorPetId))).toEqual(
+      new Set(snapshot.pets.map((pet) => pet.id))
+    );
+    expect(perceptions.map((event) => event.payload.responseLevel)).toEqual(
+      expect.arrayContaining(["social_response", "ambient_reaction", "internal_reaction"])
+    );
+    expect(actionEvents.length).toBeGreaterThan(0);
+    expect(result.snapshot.events).toHaveLength(snapshot.events.length + result.events.length);
+  });
+
+  it("does not ask observe-only or internal reactions to mutate world state", () => {
+    const snapshot = createSeedRoomSnapshot("2026-06-26T12:00:00.000Z");
+    const notice = createRoomNoticeEvent(
+      snapshot,
+      {
+        summary: "A developer asked pets to inspect the event cascade.",
+        significance: "high"
+      },
+      "2026-06-26T12:03:00.000Z"
+    );
+    const proposedByPet: string[] = [];
+
+    processWorldEvent(snapshot, notice, "2026-06-26T12:03:00.000Z", {
+      chooseAction: (observation) => {
+        proposedByPet.push(observation.pet.id);
+        return null;
+      }
+    });
+
+    expect(proposedByPet).toEqual(["pet-mochi", "pet-nova"]);
+    expect(proposedByPet).not.toContain("pet-byte");
+  });
+
+  it("keeps invalid proposed actions non-mutating and visible in the event cascade", () => {
+    const snapshot = createSeedRoomSnapshot("2026-06-26T12:00:00.000Z");
+    const notice = createRoomNoticeEvent(
+      snapshot,
+      {
+        summary: "A developer asked for an intentionally risky move proposal.",
+        significance: "high"
+      },
+      "2026-06-26T12:04:00.000Z"
+    );
+
+    const result = processWorldEvent(snapshot, notice, "2026-06-26T12:04:00.000Z", {
+      chooseAction: (observation) =>
+        observation.pet.id === "pet-mochi"
+          ? {
+              action: "move",
+              x: 999,
+              y: 999,
+              reasonVisible: "This move should be rejected by room bounds.",
+              riskLevel: "low"
+            }
+          : null
+    });
+
+    expect(result.snapshot.pets.find((pet) => pet.id === "pet-mochi")?.position).toEqual({
+      x: 2,
+      y: 4
+    });
+    expect(result.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "ActionRejected",
+          actorPetId: "pet-mochi",
+          payload: expect.objectContaining({
+            triggeringEventId: notice.id,
+            responseLevel: "social_response"
+          })
+        })
+      ])
+    );
   });
 });

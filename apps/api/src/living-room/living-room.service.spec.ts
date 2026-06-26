@@ -45,4 +45,33 @@ describe("LivingRoomService", () => {
     expect(ticked.snapshot.room.tick).toBe(0);
     expect(ticked.simulation.paused).toBe(true);
   });
+
+  it("injects a meaningful room event, persists the cascade, and publishes each event", async () => {
+    const service = new LivingRoomService(new InMemoryLivingRoomRepository());
+    const published: string[] = [];
+    service.subscribe((update) => {
+      if (update.event) {
+        published.push(update.event.type);
+      }
+    });
+
+    const response = await service.injectRoomEvent({
+      summary: "A developer posted a trace-polish task.",
+      significance: "high",
+      metadata: { source: "service-test" }
+    });
+
+    const persisted = await service.getMainRoom();
+    const createdEvents = response.snapshot.events.slice(1);
+
+    expect(response.snapshot.events.some((event) => event.type === "RoomNotice")).toBe(true);
+    expect(response.snapshot.events.filter((event) => event.type === "PetObserved")).toHaveLength(3);
+    expect(
+      response.snapshot.events.some((event) =>
+        ["PetMoved", "PetSaid", "PetOfferedHelp", "PetStartedWork"].includes(event.type)
+      )
+    ).toBe(true);
+    expect(persisted.snapshot.events).toEqual(response.snapshot.events);
+    expect(published).toEqual(createdEvents.map((event) => event.type));
+  });
 });

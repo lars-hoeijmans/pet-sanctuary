@@ -15,6 +15,11 @@ describe("Living Room controllers", () => {
       (await rooms.resetMainRoom({ seed: "controller-test" })).snapshot.events.at(0)?.payload
         .seed
     ).toBe("controller-test");
+    expect(
+      (await rooms.createMainRoomEvent({ summary: "Controller test notice." })).snapshot.events.some(
+        (event) => event.type === "RoomNotice"
+      )
+    ).toBe(true);
     expect((await simulation.pause()).simulation.paused).toBe(true);
     expect((await simulation.resume()).simulation.paused).toBe(false);
   });
