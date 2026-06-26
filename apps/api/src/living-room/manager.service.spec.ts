@@ -42,6 +42,22 @@ describe("LivingRoomService manager flows", () => {
     expect(persisted.snapshot.tasks.find((task) => task.id === response.task.id)?.status).toBe("completed");
   });
 
+  it("drives a directly-assigned task to completion without phantom work", async () => {
+    const service = new LivingRoomService(new InMemoryLivingRoomRepository());
+
+    const response = await service.createTask({ title: "Assigned to Byte", assignedPetId: "pet-byte" });
+
+    expect(response.task.assignedPetId).toBe("pet-byte");
+    expect(response.task.status).toBe("completed");
+    // no phantom "demo-trace-polish" work events
+    const phantom = response.snapshot.events.filter(
+      (event) => event.type === "PetStartedWork" && event.payload?.taskId === "demo-trace-polish"
+    );
+    expect(phantom).toHaveLength(0);
+    // and it didn't spin to the guard limit
+    expect(response.snapshot.events.filter((e) => e.type === "PetStartedWork").length).toBeLessThan(5);
+  });
+
   it("rolls deterministic traits and spawns a generated pet", async () => {
     const service = new LivingRoomService(new InMemoryLivingRoomRepository());
 

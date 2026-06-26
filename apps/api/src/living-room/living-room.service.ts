@@ -10,19 +10,21 @@ import {
   createWorldEvent,
   getTask,
   pauseSimulation,
-  processWorldEvent,
+  processWorldEventAsync,
   resolveSkillApproval,
   resumeSimulation,
   rollTraits,
-  runDeterministicTick
+  runAgentTickAsync
 } from "@pet-sanctuary/domain";
-import { createRuntimeWithFallback } from "@pet-sanctuary/agent-runtime";
+import { createRuntimeWithFallback, isModelRouteEnabled } from "@pet-sanctuary/agent-runtime";
 import type {
+  AgentObservation,
   Approval,
   CreatePetRequest,
   CreateRoomEventRequest,
   CreateTaskRequest,
   Pet,
+  PetAction,
   ResolveApprovalRequest,
   RollTraitsResult,
   RoomSnapshot,
@@ -49,6 +51,19 @@ export class LivingRoomService implements OnModuleInit, OnModuleDestroy {
   private readonly listeners = new Set<RoomUpdateListener>();
   private readonly tickIntervalMs = Number(process.env.SIMULATION_TICK_MS ?? 10_000);
   private interval?: NodeJS.Timeout;
+  /** Re-entrancy guard: model-driven ticks are async and may outrun the interval. */
+  private ticking = false;
+
+  /**
+   * Model-driven action chooser used by the live orchestrator. Each pet's own
+   * runtime (Hermes/Codex or opencode/Copilot, gated by SANCTUARY_AI_ENABLED) makes
+   * a real, in-character decision; FallbackRuntime drops to the deterministic policy
+   * on any null/error so the room never freezes. All output is re-validated by
+   * applyPetAction server-side (untrusted-content rule, PRD §13).
+   */
+  private readonly chooseAgentAction = async (observation: AgentObservation): Promise<PetAction | null> => {
+    return createRuntimeWithFallback(observation.pet.runtime).decideAction(observation);
+  };
 
   constructor(
     @Inject(LIVING_ROOM_REPOSITORY)
@@ -56,6 +71,10 @@ export class LivingRoomService implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   onModuleInit(): void {
+    const mode = isModelRouteEnabled()
+      ? `real LLM agents via ${process.env.SANCTUARY_AGENT_BACKEND ?? "opencode"} (${process.env.SANCTUARY_AGENT_MODEL ?? "default model"})`
+      : "deterministic fallback (SANCTUARY_AI_ENABLED is not 'true')";
+    this.logger.log(`Living Room orchestrator starting — behavior: ${mode}, tick ${this.tickIntervalMs}ms`);
     this.startLoop();
   }
 
@@ -134,9 +153,11 @@ export class LivingRoomService implements OnModuleInit, OnModuleDestroy {
       };
     }
 
-    const ticked = runDeterministicTick(snapshot);
+    // Real, model-driven tick: each eligible pet decides through its own runtime
+    // (Hermes/Codex or opencode/Copilot), with deterministic fallback on failure.
+    const ticked = await runAgentTickAsync(snapshot, this.chooseAgentAction);
     // Tasks that reached "in_progress" during the tick are executed by their
-    // agent runtime (deterministic, zero-cost in the MVP) so they actually finish.
+    // agent runtime (a real LLM agent when enabled) so they actually finish.
     const executed = await this.runRunnableTasks(ticked);
     const next = executed.snapshot;
     const newEvents = next.events.slice(snapshot.events.length);
@@ -157,7 +178,7 @@ export class LivingRoomService implements OnModuleInit, OnModuleDestroy {
     const snapshot = await this.repository.loadMainRoom();
     const timestamp = new Date().toISOString();
     const event = createRoomNoticeEvent(snapshot, request, timestamp);
-    const result = processWorldEvent(snapshot, event, timestamp);
+    const result = await processWorldEventAsync(snapshot, event, timestamp, this.chooseAgentAction);
     await this.repository.saveMainRoom(result.snapshot);
 
     const simulation = this.getSimulationStatus(result.snapshot);
@@ -190,7 +211,7 @@ export class LivingRoomService implements OnModuleInit, OnModuleDestroy {
     // publish it explicitly to keep the broadcast stream complete.
     collected.push(created.event);
 
-    const processed = processWorldEvent(next, created.event, timestamp);
+    const processed = await processWorldEventAsync(next, created.event, timestamp, this.chooseAgentAction);
     next = processed.snapshot;
     collected.push(...processed.events);
 
@@ -238,8 +259,8 @@ export class LivingRoomService implements OnModuleInit, OnModuleDestroy {
     let next = created.snapshot;
     const collected: WorldEvent[] = [...created.events];
 
-    // Let existing pets react to the newcomer.
-    const processed = processWorldEvent(next, created.events[0]!, timestamp);
+    // Let existing pets react to the newcomer (real, in-character reactions).
+    const processed = await processWorldEventAsync(next, created.events[0]!, timestamp, this.chooseAgentAction);
     next = processed.snapshot;
     collected.push(...processed.events.filter((event) => event.id !== created.events[0]!.id));
 
@@ -493,9 +514,19 @@ export class LivingRoomService implements OnModuleInit, OnModuleDestroy {
     }
 
     this.interval = setInterval(() => {
-      this.tickOnce().catch((error) =>
-        this.logger.error("Simulation tick failed", error instanceof Error ? error.stack : String(error))
-      );
+      // Model-driven ticks are async and can exceed the interval; skip overlapping
+      // runs so we never load/mutate/save the same room concurrently.
+      if (this.ticking) {
+        return;
+      }
+      this.ticking = true;
+      this.tickOnce()
+        .catch((error) =>
+          this.logger.error("Simulation tick failed", error instanceof Error ? error.stack : String(error))
+        )
+        .finally(() => {
+          this.ticking = false;
+        });
     }, this.tickIntervalMs);
   }
 

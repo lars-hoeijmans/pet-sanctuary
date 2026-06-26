@@ -6,7 +6,6 @@ import {
   type RoomSnapshot,
   type Skill,
   TRAIT_POOLS,
-  DEFAULT_PET_RUNTIME,
   type WorldEvent
 } from "@pet-sanctuary/contracts";
 import { appendEvent, createWorldEvent, stableNumber } from "./helpers.js";
@@ -138,7 +137,9 @@ export function createPet(
       summary: `${profile.name} just arrived in the Sanctuary. ${profile.riskNotes}`,
       notes: [`Released into the Sanctuary as a ${input.traits.workStyle}.`]
     },
-    runtime: input.runtime ?? DEFAULT_PET_RUNTIME,
+    // New pets are real LLM agents by default (gated by SANCTUARY_AI_ENABLED in the
+    // runtime; falls back to deterministic when the model route is off).
+    runtime: input.runtime ?? { kind: "hermes", model: null, provider: null },
     archived: false
   };
 

@@ -1,34 +1,31 @@
+import { writeFile, mkdir } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import type { AgentObservation, PetAction, PetRuntimeConfig } from "@pet-sanctuary/contracts";
+import { PetActionSchema } from "@pet-sanctuary/contracts";
 import { chooseDeterministicPetAction, type TaskRunOutcome } from "@pet-sanctuary/domain";
+import { agentComplete, extractJson } from "./llm.js";
+import { buildDecidePrompt, buildTaskPrompt, parseTaskResponse } from "./prompts.js";
+import type { AgentTaskInput, AgentTaskResult } from "./types.js";
+
+export type { AgentTaskInput, AgentTaskResult } from "./types.js";
+export * from "./llm.js";
+export { buildDecidePrompt, buildTaskPrompt, parseTaskResponse, digestEvents } from "./prompts.js";
 
 /**
  * Agent runtime boundary (PRD §15/§17). The product owns the world engine; agent
- * frameworks sit behind this small adapter. Implementations are staged:
+ * frameworks sit behind this small adapter.
  *
- *  1. DeterministicRuntime — seeded hard-coded policy (Living Room Kernel).
- *  2. AiSdkRuntime         — optional structured model-call adapter; proposals only.
- *  3. HermesRuntime        — real coding-agent task execution + skill growth.
- *  4. PiRuntime            — optional self-modifying pet (stretch).
+ *  1. DeterministicRuntime — seeded hard-coded policy (resilience fallback).
+ *  2. LlmAgentRuntime      — REAL model-driven behaviour + real task execution,
+ *                            routed through a no-cost local agent CLI (Hermes via
+ *                            the Codex subscription, or opencode via GitHub Copilot).
  *
- * Per PRD §14 the MVP must not depend on paid per-token LLM APIs. The AI/Hermes
- * adapters here are intentionally gated: they never call a paid provider on their
- * own and fall back to deterministic behavior unless a no-cost route is explicitly
- * enabled and wired in. This keeps the demo working with zero incremental cost.
+ * Per PRD §14 the MVP must not depend on paid per-token LLM APIs: the LLM runtime
+ * only ever uses subscription-backed local CLIs, is gated by `SANCTUARY_AI_ENABLED`,
+ * and the FallbackRuntime drops to deterministic on any null/error so a pet never
+ * stalls. Model output is always a *proposal* the server still validates.
  */
-
-export interface AgentTaskInput {
-  petId: string;
-  petName: string;
-  taskId: string;
-  title: string;
-  description?: string;
-  workStyle?: string;
-  riskLevel?: "low" | "medium" | "high";
-}
-
-/** The shape a runtime returns for a task run; consumed by the world engine's
- * `applyTaskResult`. */
-export type AgentTaskResult = TaskRunOutcome;
 
 export interface AgentRuntime {
   readonly kind: PetRuntimeConfig["kind"];
@@ -37,12 +34,12 @@ export interface AgentRuntime {
 }
 
 /** Whether model-backed runtimes are allowed to attempt real model calls. Off by
- * default so no paid API is ever hit without an explicit, audited opt-in. */
+ * default so no provider is ever hit without an explicit, audited opt-in. */
 export function isModelRouteEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.SANCTUARY_AI_ENABLED === "true";
 }
 
-// --- 1. Deterministic --------------------------------------------------------
+// --- 1. Deterministic (resilience fallback) ---------------------------------
 
 export class DeterministicRuntime implements AgentRuntime {
   readonly kind = "deterministic" as const;
@@ -58,9 +55,8 @@ export class DeterministicRuntime implements AgentRuntime {
 
 /**
  * Deterministic, zero-cost simulation of a pet doing focused work at its desk.
- * Streams a few progress notes flavored by work style and produces a reusable
- * procedural skill — proving the end-to-end "task → progress → learned skill"
- * loop without any external runtime or paid API.
+ * Used only when the model route is disabled or a real call fails, so the
+ * end-to-end "task → progress → learned skill" loop always resolves.
  */
 export function deterministicTaskRun(input: AgentTaskInput): AgentTaskResult {
   const key = input.workStyle && input.workStyle in WORK_STEPS ? input.workStyle : "builder";
@@ -94,56 +90,72 @@ const LEARNED_SKILL: Record<string, NonNullable<AgentTaskResult["learnedSkill"]>
   researcher: { name: "Summarize-before-asking", description: "Compress context into a short summary first.", purpose: "Save everyone's time and tokens." }
 };
 
-// --- 2. AI SDK (gated proposal adapter) -------------------------------------
+// --- 2. Real LLM agent (subscription-backed, no per-token cost) --------------
 
 /**
- * Structured model-call adapter. By design this NEVER calls a paid provider in
- * the MVP. When a no-cost route is verified and wired in, the actual model call
- * goes here; until then it returns null so the orchestrator falls back to the
- * deterministic policy. Model output, when added, is a *proposal* the server
- * still validates — it must never mutate world state directly.
+ * The real agent. `decideAction` asks the model — in this pet's voice — for one
+ * constrained, schema-valid action. `runTask` asks the model to actually perform
+ * the task, persists the artifact it produces, and surfaces a learned skill.
+ * Every result is parsed/validated; anything malformed returns null (decide) or
+ * deterministic output (task) so the world keeps moving.
  */
-export class AiSdkRuntime implements AgentRuntime {
-  readonly kind = "ai_sdk" as const;
-
-  constructor(private readonly config: PetRuntimeConfig) {}
-
-  async decideAction(_input: AgentObservation): Promise<PetAction | null> {
-    if (!isModelRouteEnabled()) {
-      return null;
-    }
-    // No no-cost model route is wired in this build. Returning null keeps the
-    // pet deterministic instead of silently hitting a paid API (PRD §14).
-    return null;
-  }
-
-  async runTask(input: AgentTaskInput): Promise<AgentTaskResult> {
-    // Falls back to the deterministic simulation until a model route is enabled.
-    return deterministicTaskRun(input);
-  }
-}
-
-// --- 3/4. Hermes / Pi (real execution, gated) -------------------------------
-
-/**
- * Adapter for a real coding-agent harness (Hermes; Pi is the stretch variant).
- * Integrating live Hermes requires an external runtime + a verified model route,
- * which is out of scope for the local-first MVP. Until configured, task runs use
- * the deterministic simulation so the desk-work loop is demonstrable end to end.
- */
-export class HermesRuntime implements AgentRuntime {
+export class LlmAgentRuntime implements AgentRuntime {
   readonly kind: PetRuntimeConfig["kind"];
 
   constructor(private readonly config: PetRuntimeConfig) {
-    this.kind = config.kind === "pi" ? "pi" : "hermes";
+    this.kind = config.kind;
   }
 
-  async decideAction(_input: AgentObservation): Promise<PetAction | null> {
-    return null;
+  async decideAction(input: AgentObservation): Promise<PetAction | null> {
+    if (!isModelRouteEnabled()) {
+      return null;
+    }
+    const raw = await agentComplete(buildDecidePrompt(input), { fast: true });
+    if (!raw) return null;
+    const json = extractJson(raw);
+    if (!json) return null;
+    const parsed = PetActionSchema.safeParse(json);
+    // Untrusted model output: only a fully schema-valid action survives. The
+    // server still re-validates against permissions/world state downstream.
+    return parsed.success ? parsed.data : null;
   }
 
   async runTask(input: AgentTaskInput): Promise<AgentTaskResult> {
-    return deterministicTaskRun(input);
+    if (!isModelRouteEnabled()) {
+      return deterministicTaskRun(input);
+    }
+    const raw = await agentComplete(buildTaskPrompt(input), { fast: false });
+    const parsed = raw ? parseTaskResponse(raw) : null;
+    if (!parsed) {
+      // Real call failed or returned nothing usable — still resolve the task.
+      return deterministicTaskRun(input);
+    }
+
+    const outputRef = await persistArtifact(input, parsed.artifactContent);
+    return {
+      status: parsed.status,
+      summary: parsed.summary,
+      outputRef,
+      steps: parsed.steps.length > 0 ? parsed.steps : [`${input.petName} worked through "${input.title}".`],
+      learnedSkill: parsed.learnedSkill
+    };
+  }
+}
+
+/** Write the artifact the model produced to a per-pet workspace and return a ref. */
+async function persistArtifact(input: AgentTaskInput, content: unknown): Promise<string> {
+  const fallbackRef = `artifact://${input.taskId}/summary.md`;
+  if (typeof content !== "string" || !content.trim()) {
+    return fallbackRef;
+  }
+  try {
+    const dir = join(process.env.SANCTUARY_WORKSPACE_DIR || join(tmpdir(), "pet-sanctuary-workspaces"), input.petId);
+    await mkdir(dir, { recursive: true });
+    const file = join(dir, `${input.taskId}.md`);
+    await writeFile(file, content, "utf8");
+    return `file://${file}`;
+  } catch {
+    return fallbackRef;
   }
 }
 
@@ -152,10 +164,9 @@ export class HermesRuntime implements AgentRuntime {
 export function createRuntime(config: PetRuntimeConfig): AgentRuntime {
   switch (config.kind) {
     case "ai_sdk":
-      return new AiSdkRuntime(config);
     case "hermes":
     case "pi":
-      return new HermesRuntime(config);
+      return new LlmAgentRuntime(config);
     case "deterministic":
     default:
       return new DeterministicRuntime();
@@ -164,8 +175,8 @@ export function createRuntime(config: PetRuntimeConfig): AgentRuntime {
 
 /**
  * Wrap a primary runtime so a null/failed decision or task run always falls back
- * to the deterministic policy. This is what the orchestrator should use: it gets
- * model-backed behavior when available and never stalls a pet otherwise.
+ * to the deterministic policy. This is what the orchestrator uses: it gets real
+ * model-backed behaviour when available and never stalls a pet otherwise.
  */
 export class FallbackRuntime implements AgentRuntime {
   readonly kind: PetRuntimeConfig["kind"];

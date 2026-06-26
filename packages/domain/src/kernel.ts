@@ -44,6 +44,9 @@ export interface ProcessWorldEventOptions {
   chooseAction?: (observation: AgentObservation) => PetAction | null;
 }
 
+/** Async action chooser — backed by a real model runtime (PRD §10/§17). */
+export type AsyncChooseAction = (observation: AgentObservation) => Promise<PetAction | null>;
+
 export interface ProcessWorldEventResult {
   snapshot: RoomSnapshot;
   triggeringEvent: WorldEvent;
@@ -87,7 +90,7 @@ export function createSeedRoomSnapshot(timestamp: string = new Date().toISOStrin
         summary: "Remembers that helpful actions should leave the room easier to understand.",
         notes: ["Started in the Living Room Kernel seed."]
       },
-      runtime: { kind: "deterministic", model: null, provider: null },
+      runtime: { kind: "hermes", model: null, provider: null },
       archived: false
     },
     {
@@ -114,7 +117,7 @@ export function createSeedRoomSnapshot(timestamp: string = new Date().toISOStrin
         summary: "Remembers to review behavior through visible events rather than private chats.",
         notes: ["Started in the Living Room Kernel seed."]
       },
-      runtime: { kind: "deterministic", model: null, provider: null },
+      runtime: { kind: "hermes", model: null, provider: null },
       archived: false
     },
     {
@@ -141,7 +144,7 @@ export function createSeedRoomSnapshot(timestamp: string = new Date().toISOStrin
         summary: "Remembers that debugging starts by making traces visible.",
         notes: ["Started in the Living Room Kernel seed."]
       },
-      runtime: { kind: "deterministic", model: null, provider: null },
+      runtime: { kind: "hermes", model: null, provider: null },
       archived: false
     }
   ];
@@ -302,6 +305,130 @@ export function processWorldEvent(
     triggeringEvent: event,
     events
   };
+}
+
+/**
+ * Async sibling of {@link processWorldEvent}: every active pet perceives the event,
+ * then pets at an action-capable response level propose one action through a real
+ * model chooser (resolved in parallel), and accepted proposals are applied
+ * sequentially and validated server-side. Used by the live orchestrator so pet
+ * reactions to tasks/notices are genuinely model-driven, not deterministic.
+ */
+export async function processWorldEventAsync(
+  snapshot: RoomSnapshot,
+  event: WorldEvent,
+  timestamp: string,
+  chooseAction: AsyncChooseAction
+): Promise<ProcessWorldEventResult> {
+  const events: WorldEvent[] = [];
+  let next = snapshot;
+
+  if (!next.events.some((existing) => existing.id === event.id)) {
+    next = appendEvent(next, event);
+    events.push(event);
+  }
+
+  const result = await perceiveAndActAsync(next, event, timestamp, chooseAction, true);
+  next = result.snapshot;
+  events.push(...result.events);
+
+  return {
+    snapshot: RoomSnapshotSchema.parse(next),
+    triggeringEvent: event,
+    events
+  };
+}
+
+/**
+ * Async, model-driven simulation tick. Mirrors {@link runDeterministicTick} but
+ * each eligible pet's action comes from the real runtime (decisions resolved in
+ * parallel, applied sequentially). The chooser is expected to fall back to the
+ * deterministic policy on its own, so the room always keeps moving.
+ */
+export async function runAgentTickAsync(
+  snapshot: RoomSnapshot,
+  chooseAction: AsyncChooseAction,
+  timestamp: string = new Date().toISOString()
+): Promise<RoomSnapshot> {
+  if (snapshot.room.paused) {
+    return snapshot;
+  }
+
+  const tickedRoom = { ...snapshot.room, tick: snapshot.room.tick + 1 };
+  let next: RoomSnapshot = appendEvent(
+    { ...snapshot, room: tickedRoom },
+    createWorldEvent({
+      snapshot: { room: tickedRoom, events: snapshot.events },
+      type: "SimulationTick",
+      timestamp,
+      actorPetId: null,
+      payload: { tick: tickedRoom.tick },
+      visibility: "system",
+      significance: "low"
+    })
+  );
+
+  const tickEvent = latestEvent(next);
+  if (tickEvent) {
+    const result = await perceiveAndActAsync(next, tickEvent, timestamp, chooseAction, false);
+    next = result.snapshot;
+  }
+
+  return RoomSnapshotSchema.parse(next);
+}
+
+/**
+ * Shared engine for the async paths: build each active pet's observation, emit
+ * perception events (when `emitPerception`), resolve all action-capable pets'
+ * proposals in parallel, then apply accepted actions sequentially so every
+ * mutation is still validated against the evolving snapshot.
+ */
+async function perceiveAndActAsync(
+  snapshot: RoomSnapshot,
+  triggeringEvent: WorldEvent,
+  timestamp: string,
+  chooseAction: AsyncChooseAction,
+  emitPerception: boolean
+): Promise<{ snapshot: RoomSnapshot; events: WorldEvent[] }> {
+  const events: WorldEvent[] = [];
+  let next = snapshot;
+
+  const proposers: { petId: string; observation: AgentObservation; responseLevel: AgentObservation["responseLevel"] }[] = [];
+  for (const pet of next.pets.filter((candidate) => candidate.status !== "paused" && !candidate.archived)) {
+    const observation = buildObservation(next, pet.id, triggeringEvent);
+    if (emitPerception) {
+      const perceived = createPerceptionEvent(next, pet, triggeringEvent, observation.responseLevel, timestamp);
+      next = appendEvent(next, perceived);
+      events.push(perceived);
+    }
+    if (canProposeAction(observation.responseLevel)) {
+      proposers.push({ petId: pet.id, observation, responseLevel: observation.responseLevel });
+    }
+  }
+
+  const decisions = await Promise.all(
+    proposers.map(async (entry) => {
+      try {
+        return { entry, action: await chooseAction(entry.observation) };
+      } catch {
+        return { entry, action: null as PetAction | null };
+      }
+    })
+  );
+
+  for (const { entry, action } of decisions) {
+    if (!action) {
+      continue;
+    }
+    const result = applyPetAction(next, entry.petId, action, timestamp);
+    const annotatedPrimary = annotateTriggeredResponse(result.event, triggeringEvent, entry.responseLevel);
+    next = replaceEvent(result.snapshot, annotatedPrimary);
+    for (const created of result.events) {
+      events.push(created.id === result.event.id ? annotatedPrimary : created);
+    }
+  }
+
+  return { snapshot: next, events };
 }
 
 export function buildObservation(

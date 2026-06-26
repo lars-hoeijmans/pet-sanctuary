@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   applyPetAction,
   applyTaskResult,
+  buildObservation,
+  chooseDeterministicPetAction,
   classifyResponseLevel,
   composePetProfile,
   createPet,
@@ -217,6 +219,71 @@ describe("skills, approvals & karma", () => {
     expect(result.events.some((e) => e.type === "PetLearnedSkill")).toBe(true);
     expect(result.snapshot.skills.some((s) => s.petId === "pet-byte" && s.name === "Read recent events first")).toBe(true);
     expect(result.snapshot.pets.find((p) => p.id === "pet-byte")!.karma).toBe(before + 1);
+  });
+});
+
+describe("bug-fix regressions", () => {
+  it("links currentTaskId when a task is created already assigned (no phantom-task livelock)", () => {
+    const base = createSeedRoomSnapshot(TS);
+    const { snapshot, task } = createTask(
+      base,
+      { title: "Assigned at creation", description: "", riskLevel: "low", assignedPetId: "pet-byte" },
+      "manager",
+      TS
+    );
+    expect(task.status).toBe("claimed");
+    expect(snapshot.pets.find((p) => p.id === "pet-byte")!.currentTaskId).toBe(task.id);
+  });
+
+  it("rejects work on a nonexistent, finished, or another pet's task", () => {
+    const base = createSeedRoomSnapshot(TS);
+    // nonexistent
+    expect(
+      applyPetAction(base, "pet-mochi", { action: "work", taskId: "nope", reasonVisible: "x", riskLevel: "low" }, TS).ok
+    ).toBe(false);
+
+    // assigned to another pet
+    const { snapshot } = createTask(base, { title: "Byte's", description: "", riskLevel: "low", assignedPetId: "pet-byte" }, "manager", TS);
+    const taskId = snapshot.tasks[0]!.id;
+    expect(
+      applyPetAction(snapshot, "pet-mochi", { action: "work", taskId, reasonVisible: "steal", riskLevel: "low" }, TS).ok
+    ).toBe(false);
+  });
+
+  it("does not fabricate a 'demo-trace-polish' task when a pet has no real work", () => {
+    const base = createSeedRoomSnapshot(TS);
+    const observation = { ...buildObservation(base, "pet-nova"), responseLevel: "task_action" as const };
+    const action = chooseDeterministicPetAction(observation);
+    // With no current/claimable task, the pet must not invent a work task.
+    expect(action?.action === "work").toBe(false);
+  });
+
+  it("frees the assigned pet when a task result needs review", () => {
+    const base = createSeedRoomSnapshot(TS);
+    const created = createTask(base, { title: "Review me", description: "", riskLevel: "low" }, "manager", TS);
+    const claimed = applyPetAction(created.snapshot, "pet-nova", { action: "claim_task", taskId: created.task.id, reasonVisible: "x", riskLevel: "low" }, TS);
+    const working = applyPetAction(claimed.snapshot, "pet-nova", { action: "work", taskId: created.task.id, reasonVisible: "y", riskLevel: "low" }, TS);
+    expect(working.snapshot.pets.find((p) => p.id === "pet-nova")!.status).toBe("working");
+
+    const result = applyTaskResult(working.snapshot, created.task.id, { status: "needs_review", summary: "needs eyes", steps: [] }, TS);
+    const nova = result.snapshot.pets.find((p) => p.id === "pet-nova")!;
+    expect(nova.currentTaskId).toBeNull();
+    expect(nova.status).not.toBe("working");
+    expect(result.snapshot.tasks.find((t) => t.id === created.task.id)!.status).toBe("in_review");
+  });
+
+  it("keeps a user-rejected risky skill from silently re-activating on re-learn", () => {
+    const base = createSeedRoomSnapshot(TS);
+    const learned = learnSkill(base, "pet-nova", { name: "Shell runner", purpose: "execute bash commands", source: "requested" }, TS);
+    const approval = learned.snapshot.approvals[0]!;
+    const rejected = resolveSkillApproval(learned.snapshot, approval.id, "reject", "manager", TS);
+    expect(rejected.snapshot.skills.find((s) => s.id === approval.targetId)!.status).toBe("rejected");
+
+    const relearned = learnSkill(rejected.snapshot, "pet-nova", { name: "Shell runner", purpose: "tidy helper", source: "requested" }, TS);
+    const skill = relearned.snapshot.skills.find((s) => s.id === approval.targetId)!;
+    expect(skill.status).not.toBe("active");
+    expect(skill.status).toBe("staged");
+    expect(relearned.snapshot.approvals.some((a) => a.status === "pending")).toBe(true);
   });
 });
 
