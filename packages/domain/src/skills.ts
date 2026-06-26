@@ -26,6 +26,16 @@ export function classifySkillRisk(name: string, purpose: string | null | undefin
   return "low";
 }
 
+const RISK_RANK: Record<RiskLevel, number> = { low: 0, medium: 1, high: 2 };
+
+/** Return the stricter (higher) of two risk levels. */
+export function strictestRisk(a: RiskLevel, b: RiskLevel | undefined): RiskLevel {
+  if (!b) {
+    return a;
+  }
+  return RISK_RANK[a] >= RISK_RANK[b] ? a : b;
+}
+
 export interface LearnSkillInput {
   name: string;
   description?: string;
@@ -47,12 +57,18 @@ export function learnSkill(
   timestamp: string
 ): { snapshot: RoomSnapshot; skill: Skill; events: WorldEvent[] } {
   const pet = requirePet(snapshot, petId);
-  const riskLevel = input.riskLevel ?? classifySkillRisk(input.name, input.purpose);
-  const gated = riskLevel === "high";
 
   const existing = snapshot.skills.find(
     (skill) => skill.petId === petId && skill.name.toLowerCase() === input.name.toLowerCase()
   );
+
+  // Classification is a floor: take the stricter of the heuristic and any
+  // caller-supplied risk so a caller can never under-declare risk.
+  const riskLevel = strictestRisk(classifySkillRisk(input.name, input.purpose), input.riskLevel);
+  const wasRejected = !!existing && existing.status === "rejected";
+  // Stage (require approval) for any non-low risk, and never let a previously
+  // rejected skill silently re-activate — it must go back through approval.
+  const gated = riskLevel !== "low" || wasRejected;
 
   const events: WorldEvent[] = [];
   let nextSkills: Skill[];
@@ -64,9 +80,9 @@ export function learnSkill(
       description: input.description ?? existing.description,
       purpose: input.purpose ?? existing.purpose,
       version: existing.version + 1,
-      // Improving an already-active virtual skill keeps it active; risky skills
-      // re-enter staging so the new revision is re-approved.
-      status: gated ? "staged" : existing.status === "rejected" ? "active" : existing.status,
+      // Improving an already-active virtual skill keeps it active; risky or
+      // previously-rejected skills re-enter staging so the new revision is re-approved.
+      status: gated ? "staged" : existing.status,
       riskLevel,
       triggeringEventId: input.triggeringEventId ?? existing.triggeringEventId,
       lastUsedAt: existing.lastUsedAt

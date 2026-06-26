@@ -49,7 +49,13 @@ export function createTask(
     updatedAt: timestamp
   };
 
-  let next: RoomSnapshot = { ...snapshot, tasks: [...snapshot.tasks, task] };
+  // When a task is created already assigned to a pet, link that pet to it so the
+  // assignee can actually drive it (otherwise it is "claimed" with no owner state).
+  let next: RoomSnapshot = {
+    ...snapshot,
+    tasks: [...snapshot.tasks, task],
+    pets: task.assignedPetId ? updatePet(snapshot.pets, task.assignedPetId, { currentTaskId: task.id }) : snapshot.pets
+  };
 
   const event = createWorldEvent({
     snapshot: next,
@@ -166,6 +172,10 @@ export function applyTaskResult(
       ...next,
       tasks: updateTask(next.tasks, taskId, { status: "in_review", outputRef: outcome.outputRef ?? null }, timestamp)
     };
+    // Free the pet so it is not stuck "working" on a task awaiting review.
+    if (petId) {
+      next = { ...next, pets: updatePet(next.pets, petId, { status: "observing", currentTaskId: null }) };
+    }
     const reviewEvent = createWorldEvent({
       snapshot: next,
       type: "TaskProgressed",

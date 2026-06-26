@@ -466,12 +466,20 @@ export function chooseDeterministicPetAction(observation: AgentObservation): Pet
     }
   }
 
-  if (responseLevel === "task_action" && pet.permissions.canWork) {
+  // Only work a real, workable task this pet actually owns — never fabricate an id.
+  if (
+    responseLevel === "task_action" &&
+    pet.permissions.canWork &&
+    observation.currentTask &&
+    (observation.currentTask.status === "claimed" ||
+      observation.currentTask.status === "planned" ||
+      observation.currentTask.status === "in_progress")
+  ) {
     return {
       action: "work",
-      taskId: pet.currentTaskId ?? "demo-trace-polish",
-      reasonVisible: `${pet.name} turns the visible trace into a small work loop.`,
-      riskLevel: "low"
+      taskId: observation.currentTask.id,
+      reasonVisible: `${pet.name} continues focused work at the desk.`,
+      riskLevel: observation.currentTask.riskLevel
     };
   }
 
@@ -483,7 +491,7 @@ export function chooseDeterministicPetAction(observation: AgentObservation): Pet
       return {
         action: "offer_help",
         targetPetId: typeof target === "string" ? target : target.id,
-        taskId: pet.currentTaskId ?? "demo-trace-polish",
+        taskId: pet.currentTaskId ?? observation.openTasks[0]?.id ?? "general-help",
         message: "I can keep this tiny and traceable.",
         reasonVisible: `${pet.name} is helpful and careful, so they offer bounded help.`,
         riskLevel: "low"
@@ -543,9 +551,21 @@ export function validatePetAction(snapshot: RoomSnapshot, petId: string, propose
       if (!pet.permissions.canMove) errors.push(`${pet.name} cannot move.`);
       if (!isInsideRoom(snapshot, { x: action.x, y: action.y })) errors.push("Move is outside the room bounds.");
       break;
-    case "work":
+    case "work": {
       if (!pet.permissions.canWork) errors.push(`${pet.name} cannot work.`);
+      const task = getTask(snapshot, action.taskId);
+      if (!task) {
+        errors.push("Task does not exist.");
+      } else {
+        if (["completed", "cancelled", "in_review"].includes(task.status)) {
+          errors.push("Task is not workable in its current state.");
+        }
+        if (task.assignedPetId && task.assignedPetId !== pet.id) {
+          errors.push("Task is assigned to another pet.");
+        }
+      }
       break;
+    }
     case "ask_help":
       if (!pet.permissions.canAskHelp) errors.push(`${pet.name} cannot ask for help.`);
       validateOtherPet(snapshot, pet.id, action.targetPetId, errors);

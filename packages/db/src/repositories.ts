@@ -1,4 +1,4 @@
-import { asc, eq } from "drizzle-orm";
+import { asc, eq, inArray } from "drizzle-orm";
 import {
   type Approval,
   ApprovalSchema,
@@ -21,7 +21,6 @@ import type { SanctuaryDb } from "./connection.js";
 import {
   approvals,
   events,
-  memories,
   pets,
   relationships,
   rooms,
@@ -48,8 +47,10 @@ export async function loadRoomSnapshot(db: SanctuaryDb, roomId: string): Promise
   const taskRows = await db.select().from(tasks).where(eq(tasks.roomId, roomId)).orderBy(asc(tasks.id));
   const approvalRows = await db.select().from(approvals).where(eq(approvals.roomId, roomId)).orderBy(asc(approvals.id));
   const relationshipRows = await db.select().from(relationships).where(eq(relationships.roomId, roomId)).orderBy(asc(relationships.id));
-  const petIds = new Set(petRows.map((row) => row.id));
-  const skillRows = (await db.select().from(skills).orderBy(asc(skills.id))).filter((row) => petIds.has(row.petId));
+  const petIds = petRows.map((row) => row.id);
+  const skillRows = petIds.length
+    ? await db.select().from(skills).where(inArray(skills.petId, petIds)).orderBy(asc(skills.id))
+    : [];
 
   return RoomSnapshotSchema.parse({
     room: RoomSchema.parse({
@@ -195,15 +196,6 @@ export async function replaceRoomSnapshot(db: SanctuaryDb, snapshot: RoomSnapsho
 
     for (const pet of parsed.pets) {
       await tx.insert(pets).values(toPetRow(pet));
-      for (const [index, note] of pet.memory.notes.entries()) {
-        await tx.insert(memories).values({
-          id: `${pet.id}-seed-memory-${index}`,
-          petId: pet.id,
-          type: "seed_note",
-          content: note,
-          confidence: 1
-        });
-      }
     }
 
     for (const skill of parsed.skills) {

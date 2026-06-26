@@ -438,23 +438,42 @@ export const AgentObservationSchema = z.object({
 });
 export type AgentObservation = z.infer<typeof AgentObservationSchema>;
 
-export const ServerWebSocketEventSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("snapshot"), snapshot: RoomSnapshotSchema }),
-  z.object({ type: z.literal("world_event"), event: WorldEventSchema }),
-  z.object({ type: z.literal("pet_updated"), pet: PetSchema }),
-  z.object({ type: z.literal("object_updated"), object: WorldObjectSchema }),
-  z.object({ type: z.literal("task_updated"), task: TaskSchema }),
-  z.object({ type: z.literal("skill_updated"), skill: SkillSchema }),
-  z.object({ type: z.literal("approval_updated"), approval: ApprovalSchema }),
-  z.object({ type: z.literal("simulation_state"), room: RoomSchema }),
-  z.object({
-    type: z.literal("action_rejected"),
-    petId: z.string().min(1),
-    errors: z.array(z.string()),
-    event: WorldEventSchema
-  })
-]);
-export type ServerWebSocketEvent = z.infer<typeof ServerWebSocketEventSchema>;
+// --- WebSocket wire protocol (matches the NestJS gateway) -----------------
+//
+// The gateway uses Socket.IO *named* events, not a discriminated union, so these
+// schemas describe the actual payloads carried by each named event.
+
+export const SimulationStatusSchema = z.object({
+  paused: z.boolean(),
+  tick: z.number().int().nonnegative(),
+  tickIntervalMs: z.number().int().positive()
+});
+export type SimulationStatus = z.infer<typeof SimulationStatusSchema>;
+
+export const RoomResponseSchema = z.object({
+  snapshot: RoomSnapshotSchema,
+  simulation: SimulationStatusSchema
+});
+export type RoomResponse = z.infer<typeof RoomResponseSchema>;
+
+export const RoomUpdateSchema = z.object({
+  snapshot: RoomSnapshotSchema,
+  event: WorldEventSchema.optional(),
+  simulation: SimulationStatusSchema
+});
+export type RoomUpdate = z.infer<typeof RoomUpdateSchema>;
+
+/** Server → client Socket.IO event names and the payload each carries. */
+export const SERVER_SOCKET_EVENTS = {
+  snapshot: "room:snapshot", // RoomResponse
+  update: "room:update", // RoomUpdate
+  event: "room:event" // WorldEvent
+} as const;
+
+/** Client → server Socket.IO event names. */
+export const CLIENT_SOCKET_EVENTS = {
+  getSnapshot: "room:getSnapshot" // { roomId }
+} as const;
 
 export const CreateRoomEventRequestSchema = z.object({
   summary: z
@@ -469,14 +488,8 @@ export const CreateRoomEventRequestSchema = z.object({
 });
 export type CreateRoomEventRequest = z.infer<typeof CreateRoomEventRequestSchema>;
 
-export const ClientWebSocketEventSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("request_snapshot"), roomId: z.string().min(1) }),
-  z.object({ type: z.literal("pause_simulation"), roomId: z.string().min(1) }),
-  z.object({ type: z.literal("resume_simulation"), roomId: z.string().min(1) }),
-  z.object({ type: z.literal("reset_to_seed"), roomId: z.string().min(1) }),
-  z.object({ type: z.literal("propose_pet_action"), roomId: z.string().min(1), petId: z.string().min(1), action: PetActionSchema })
-]);
-export type ClientWebSocketEvent = z.infer<typeof ClientWebSocketEventSchema>;
+export const RoomGetSnapshotMessageSchema = z.object({ roomId: z.string().min(1) });
+export type RoomGetSnapshotMessage = z.infer<typeof RoomGetSnapshotMessageSchema>;
 
 // --- Manager console / REST request DTOs ---------------------------------
 

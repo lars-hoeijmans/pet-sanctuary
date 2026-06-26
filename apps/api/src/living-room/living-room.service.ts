@@ -1,4 +1,4 @@
-import { BadRequestException, Inject, Injectable, NotFoundException, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
+import { BadRequestException, Inject, Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import {
   applyPetAction,
   applyTaskResult,
@@ -45,6 +45,7 @@ type RoomUpdateListener = (update: RoomUpdate) => void | Promise<void>;
 
 @Injectable()
 export class LivingRoomService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(LivingRoomService.name);
   private readonly listeners = new Set<RoomUpdateListener>();
   private readonly tickIntervalMs = Number(process.env.SIMULATION_TICK_MS ?? 10_000);
   private interval?: NodeJS.Timeout;
@@ -344,6 +345,7 @@ export class LivingRoomService implements OnModuleInit, OnModuleDestroy {
   private async driveAndRunTasks(snapshot: RoomSnapshot): Promise<{ snapshot: RoomSnapshot; events: WorldEvent[] }> {
     let next = snapshot;
     const events: WorldEvent[] = [];
+    const seen = new Set<string>();
     let guard = 0;
 
     while (guard < 80) {
@@ -365,6 +367,14 @@ export class LivingRoomService implements OnModuleInit, OnModuleDestroy {
         next = await this.executeTask(next, task.id, pet, events);
         continue;
       }
+
+      // Defensive: if we revisit the exact same drive state, we're not making
+      // progress — break instead of spinning to the guard limit.
+      const signature = `${task.id}:${task.status}:${pet.position.x},${pet.position.y}:${pet.currentTaskId}`;
+      if (seen.has(signature)) {
+        break;
+      }
+      seen.add(signature);
 
       const observation = { ...buildObservation(next, pet.id), responseLevel: "task_action" as const };
       const action = chooseDeterministicPetAction(observation);
@@ -483,7 +493,9 @@ export class LivingRoomService implements OnModuleInit, OnModuleDestroy {
     }
 
     this.interval = setInterval(() => {
-      void this.tickOnce();
+      this.tickOnce().catch((error) =>
+        this.logger.error("Simulation tick failed", error instanceof Error ? error.stack : String(error))
+      );
     }, this.tickIntervalMs);
   }
 
