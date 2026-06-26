@@ -61,14 +61,15 @@ export class DeterministicRuntime implements AgentRuntime {
 export function deterministicTaskRun(input: AgentTaskInput): AgentTaskResult {
   const key = input.workStyle && input.workStyle in WORK_STEPS ? input.workStyle : "builder";
   const steps = WORK_STEPS[key] ?? WORK_STEPS.builder ?? [];
-  const learnedSkill = LEARNED_SKILL[key] ?? LEARNED_SKILL.builder ?? null;
 
   return {
     status: "completed",
     summary: `${input.petName} finished "${input.title}" with small, reviewable steps.`,
     outputRef: `artifact://${input.taskId}/summary.md`,
     steps: steps.map((step) => step.replace("{title}", input.title)),
-    learnedSkill
+    // A deterministic fallback did no genuine novel work, so it claims no learned
+    // skill — skills are occasional and meaningful (PRD §11), never per-task.
+    learnedSkill: null
   };
 }
 
@@ -79,15 +80,6 @@ const WORK_STEPS: Record<string, string[]> = {
   debugger: ["Reproduced the issue behind {title}.", "Logged a visible trace.", "Confirmed the fix with the trace."],
   refactorer: ["Renamed the unclear parts of {title}.", "Reshaped the structure without changing behavior.", "Verified nothing observable changed."],
   researcher: ["Summarized context for {title}.", "Compared two approaches.", "Recommended the safer one."]
-};
-
-const LEARNED_SKILL: Record<string, NonNullable<AgentTaskResult["learnedSkill"]>> = {
-  builder: { name: "Reversible-first changes", description: "Always ship the smallest reversible step.", purpose: "Keep work easy to review and undo." },
-  reviewer: { name: "Edge-case checklist", description: "Reuse a checklist of common edge cases.", purpose: "Catch problems before completion." },
-  planner: { name: "Plan-then-handoff", description: "Write a short plan before handing work off.", purpose: "Make intent visible and reviewable." },
-  debugger: { name: "Trace-before-conclude", description: "Reproduce and log before drawing conclusions.", purpose: "Turn uncertainty into evidence." },
-  refactorer: { name: "Behavior-preserving cleanup", description: "Improve clarity without changing behavior.", purpose: "Reduce risk while improving readability." },
-  researcher: { name: "Summarize-before-asking", description: "Compress context into a short summary first.", purpose: "Save everyone's time and tokens." }
 };
 
 // --- 2. Real LLM agent (subscription-backed, no per-token cost) --------------
