@@ -20,12 +20,15 @@ import {
   type VoiceSettings,
 } from "../client/audio/voices";
 
-// Load .env (Node >= 20.6). Typed without `any`.
+// Load .env (Node >= 20.6). Typed without `any`. Try the app dir first, then the
+// monorepo root where the canonical secrets (ELEVENLABS_API_KEY) actually live.
 const proc = process as unknown as { loadEnvFile?: (path?: string) => void };
-try {
-  proc.loadEnvFile?.(resolve(process.cwd(), ".env"));
-} catch {
-  /* .env optional — key may already be in the environment */
+for (const envPath of [resolve(process.cwd(), ".env"), resolve(process.cwd(), "../../.env")]) {
+  try {
+    proc.loadEnvFile?.(envPath);
+  } catch {
+    /* .env optional — key may already be in the environment */
+  }
 }
 
 const API_KEY = process.env.ELEVENLABS_API_KEY?.trim();
