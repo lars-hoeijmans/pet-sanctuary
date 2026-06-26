@@ -132,6 +132,10 @@ export function createPet(
     karma: profile.initialKarma,
     permissions: DEFAULT_PERMISSIONS,
     position,
+    destination: null,
+    path: [] as Position[],
+    needs: { energy: 100, focus: 100, social: 100, curiosity: 100 },
+    goal: null,
     currentTaskId: null,
     memory: {
       summary: `${profile.name} just arrived in the Sanctuary. ${profile.riskNotes}`,

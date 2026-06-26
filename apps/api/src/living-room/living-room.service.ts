@@ -1,9 +1,12 @@
 import { BadRequestException, Inject, Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import {
+  advanceLocomotion,
   applyPetAction,
   applyTaskResult,
   buildObservation,
   chooseDeterministicPetAction,
+  deriveActionFromGoal,
+  goalStillValid,
   createPet,
   createRoomNoticeEvent,
   createTask,
@@ -62,6 +65,17 @@ export class LivingRoomService implements OnModuleInit, OnModuleDestroy {
    * applyPetAction server-side (untrusted-content rule, PRD §13).
    */
   private readonly chooseAgentAction = async (observation: AgentObservation): Promise<PetAction | null> => {
+    // Hold goals across ticks: if the pet has a still-valid goal, the engine
+    // carries it out deterministically (walk to a desk, then work) with NO model
+    // call. The runtime is only consulted when there is no goal or the goal just
+    // finished/blocked — a big token saver and what makes behavior coherent over
+    // time instead of re-decided from scratch every tick.
+    if (observation.pet.goal && goalStillValid(observation)) {
+      const derived = deriveActionFromGoal(observation);
+      if (derived) {
+        return derived;
+      }
+    }
     return createRuntimeWithFallback(observation.pet.runtime).decideAction(observation);
   };
 
@@ -446,6 +460,16 @@ export class LivingRoomService implements OnModuleInit, OnModuleDestroy {
         continue;
       }
 
+      // Movement is now state, not teleport: a `move`/`move_to` (issued here or
+      // during the perception phase) only sets a path; the physics step walks it
+      // one tile per tick. Outside the tick loop we must pump that step ourselves,
+      // otherwise the pet never reaches the desk and this drive loop stalls. Drain
+      // any in-flight walk first, then re-evaluate with the pet in its new spot.
+      if (pet.path.length > 0) {
+        next = this.drainWalk(next, pet.id, events);
+        continue;
+      }
+
       // Defensive: if we revisit the exact same drive state, we're not making
       // progress — break instead of spinning to the guard limit.
       const signature = `${task.id}:${task.status}:${pet.position.x},${pet.position.y}:${pet.currentTaskId}`;
@@ -468,6 +492,27 @@ export class LivingRoomService implements OnModuleInit, OnModuleDestroy {
     }
 
     return { snapshot: next, events };
+  }
+
+  /**
+   * Pump the deterministic physics step until the given pet finishes walking its
+   * pending path (bounded by the grid, well under the drive loop's guard). Used
+   * outside the tick loop, where no tick is advancing locomotion on its own.
+   */
+  private drainWalk(snapshot: RoomSnapshot, petId: string, events: WorldEvent[]): RoomSnapshot {
+    let next = snapshot;
+    let walkGuard = 0;
+    while (walkGuard < 64) {
+      walkGuard += 1;
+      const walking = next.pets.find((candidate) => candidate.id === petId);
+      if (!walking || walking.path.length === 0) {
+        break;
+      }
+      const loco = advanceLocomotion(next, new Date().toISOString());
+      next = loco.snapshot;
+      events.push(...loco.events);
+    }
+    return next;
   }
 
   /** Run the agent runtime for any in-progress task that hasn't produced output. */

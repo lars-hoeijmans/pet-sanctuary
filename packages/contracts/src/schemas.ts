@@ -58,6 +58,38 @@ export const PetMemorySchema = z.object({
 export type PetMemory = z.infer<typeof PetMemorySchema>;
 
 /**
+ * Intrinsic drives (0..100, higher = more satisfied). They decay each tick and
+ * bias what a pet wants to do when no external event demands a response, so the
+ * room feels alive on quiet ticks instead of going idle. Defaults to fully
+ * satisfied so older persisted/seed rooms parse unchanged.
+ */
+export const PetNeedsSchema = z.object({
+  energy: z.number().min(0).max(100).default(100),
+  focus: z.number().min(0).max(100).default(100),
+  social: z.number().min(0).max(100).default(100),
+  curiosity: z.number().min(0).max(100).default(100)
+});
+export type PetNeeds = z.infer<typeof PetNeedsSchema>;
+
+export const DEFAULT_PET_NEEDS: PetNeeds = { energy: 100, focus: 100, social: 100, curiosity: 100 };
+
+/**
+ * A pet's persistent intention. Goals survive across ticks; the engine decomposes
+ * the active goal into one concrete action per tick (walk to a desk, then work),
+ * so the model only re-decides when a goal is absent, complete, or blocked.
+ */
+export const PetGoalKindSchema = z.enum(["work_task", "socialize", "rest", "explore", "reflect", "idle"]);
+export type PetGoalKind = z.infer<typeof PetGoalKindSchema>;
+
+export const PetGoalSchema = z.object({
+  kind: PetGoalKindSchema,
+  targetId: z.string().min(1).nullable().default(null),
+  targetPosition: PositionSchema.nullable().default(null),
+  createdTick: z.number().int().nonnegative().default(0)
+});
+export type PetGoal = z.infer<typeof PetGoalSchema>;
+
+/**
  * Per-pet agent runtime configuration. The runtime decides how a pet proposes
  * actions or runs tasks. Everything defaults to the deterministic policy so the
  * Living Room Kernel works with no model provider configured. `ai_sdk`, `hermes`,
@@ -93,6 +125,13 @@ export const PetSchema = z.object({
   karma: z.number().int(),
   permissions: PetPermissionsSchema,
   position: PositionSchema,
+  // Persistent locomotion state: a pet walks toward `destination` one tile per
+  // tick along `path` (the engine's deterministic physics step), instead of
+  // teleporting. Defaults keep older persisted/seed rooms parsing unchanged.
+  destination: PositionSchema.nullable().default(null),
+  path: z.array(PositionSchema).default([]),
+  needs: PetNeedsSchema.default(DEFAULT_PET_NEEDS),
+  goal: PetGoalSchema.nullable().default(null),
   currentTaskId: z.string().min(1).nullable(),
   memory: PetMemorySchema,
   runtime: PetRuntimeConfigSchema.default(DEFAULT_PET_RUNTIME),
@@ -127,6 +166,8 @@ export const WorldEventTypeSchema = z.enum([
   "SimulationTick",
   "PetObserved",
   "PetMoved",
+  "PetArrived",
+  "PetGoalSet",
   "PetSaid",
   "PetAskedHelp",
   "PetOfferedHelp",
@@ -283,6 +324,16 @@ export const HandoffTaskActionSchema = ActionBaseSchema.extend({
   reason: z.string().min(1).max(240)
 });
 
+/**
+ * Set a persistent intention. The engine carries the goal out across ticks, so a
+ * pet only emits this when it has no goal or its goal just finished/blocked.
+ */
+export const SetGoalActionSchema = ActionBaseSchema.extend({
+  action: z.literal("set_goal"),
+  kind: PetGoalKindSchema,
+  targetId: z.string().min(1).optional()
+});
+
 export const PetActionSchema = z.discriminatedUnion("action", [
   SayActionSchema,
   MoveActionSchema,
@@ -299,7 +350,8 @@ export const PetActionSchema = z.discriminatedUnion("action", [
   ProposePlanActionSchema,
   RequestReviewActionSchema,
   AcceptHelpActionSchema,
-  HandoffTaskActionSchema
+  HandoffTaskActionSchema,
+  SetGoalActionSchema
 ]);
 export type PetAction = z.infer<typeof PetActionSchema>;
 
@@ -319,7 +371,8 @@ export const AvailableActionSchema = z.enum([
   "propose_plan",
   "request_review",
   "accept_help",
-  "handoff_task"
+  "handoff_task",
+  "set_goal"
 ]);
 export type AvailableAction = z.infer<typeof AvailableActionSchema>;
 

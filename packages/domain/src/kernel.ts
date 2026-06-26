@@ -18,6 +18,7 @@ import {
   appendEvent,
   createWorldEvent,
   distance,
+  findPath,
   isInsideRoom,
   isNearby,
   latestEvent,
@@ -27,6 +28,8 @@ import {
   updatePet
 } from "./helpers.js";
 import { applyKarmaForEvents } from "./karma.js";
+import { decayNeeds, lowestNeed, NEED_WANT_THRESHOLD } from "./needs.js";
+import { deriveActionFromGoal } from "./goals.js";
 import { learnSkill } from "./skills.js";
 import { getTask, updateTask } from "./tasks.js";
 import { bumpRelationship } from "./relationships.js";
@@ -85,6 +88,11 @@ export function createSeedRoomSnapshot(timestamp: string = new Date().toISOStrin
       karma: 3,
       permissions: DEFAULT_PERMISSIONS,
       position: { x: 2, y: 4 },
+      destination: null,
+      path: [],
+      // Slightly social-hungry from the first frame so Mochi drifts over to others.
+      needs: { energy: 70, focus: 60, social: 30, curiosity: 65 },
+      goal: null,
       currentTaskId: null,
       memory: {
         summary: "Remembers that helpful actions should leave the room easier to understand.",
@@ -112,6 +120,11 @@ export function createSeedRoomSnapshot(timestamp: string = new Date().toISOStrin
       karma: 2,
       permissions: DEFAULT_PERMISSIONS,
       position: { x: 5, y: 3 },
+      destination: null,
+      path: [],
+      // Calm and content to observe at first — a low-key reviewer presence.
+      needs: { energy: 80, focus: 75, social: 60, curiosity: 55 },
+      goal: null,
       currentTaskId: null,
       memory: {
         summary: "Remembers to review behavior through visible events rather than private chats.",
@@ -139,6 +152,11 @@ export function createSeedRoomSnapshot(timestamp: string = new Date().toISOStrin
       karma: 1,
       permissions: DEFAULT_PERMISSIONS,
       position: { x: 8, y: 5 },
+      destination: null,
+      path: [],
+      // Restless and curious — Nova starts low on focus so it moves first.
+      needs: { energy: 65, focus: 30, social: 50, curiosity: 35 },
+      goal: null,
       currentTaskId: null,
       memory: {
         summary: "Remembers that debugging starts by making traces visible.",
@@ -176,6 +194,15 @@ export function createSeedRoomSnapshot(timestamp: string = new Date().toISOStrin
       state: { station: "debugger" },
       ownerPetId: null,
       description: "A bright desk with space for debugging traces."
+    },
+    {
+      id: "obj-desk-tiny",
+      roomId: room.id,
+      type: "desk",
+      position: { x: 5, y: 5 },
+      state: { station: "collab" },
+      ownerPetId: null,
+      description: "A small desk for pairing up."
     },
     {
       id: "obj-lamp",
@@ -368,7 +395,14 @@ export async function runAgentTickAsync(
     })
   );
 
+  // Capture the SimulationTick as the perception trigger before physics appends
+  // PetMoved/PetArrived events on top of it.
   const tickEvent = latestEvent(next);
+
+  // Physics before cognition: walk everyone one tile, then decay drives.
+  next = advanceLocomotion(next, timestamp).snapshot;
+  next = decayNeeds(next);
+
   if (tickEvent) {
     const result = await perceiveAndActAsync(next, tickEvent, timestamp, chooseAction, false);
     next = result.snapshot;
@@ -503,18 +537,23 @@ export function classifyResponseLevel(
     return "ambient_reaction";
   }
 
-  // Keep the room visibly alive on quiet ticks: most pets should still do
-  // something small and in-character (a passing remark or a step) rather than
-  // sit silent. Cadence is seeded per (tick, pet, event) so it stays stable and
-  // replayable while spreading activity across pets.
-  const cadence = stableNumber(`${snapshot.room.tick}:${pet.id}:${event.id}`) % 4;
-  if (cadence === 0 && pet.permissions.canSpeak) {
-    return "social_response";
+  // Quiet tick: pets act for intrinsic reasons rather than a blind cadence. A
+  // pet that owns work keeps driving it; otherwise a low drive (energy, focus,
+  // social, curiosity) motivates a small in-character action. This keeps the
+  // room alive without making every pet twitch every tick.
+  if (pet.currentTaskId) {
+    return "task_action";
   }
-  if (cadence === 1 && pet.permissions.canMove) {
-    return "ambient_reaction";
-  }
-  if (cadence === 2) {
+
+  const low = lowestNeed(pet.needs);
+  if (low.value < NEED_WANT_THRESHOLD) {
+    // Social hunger pulls a pet toward others; other drives prompt a small move.
+    if (low.key === "social" && pet.permissions.canSpeak) {
+      return "social_response";
+    }
+    if (pet.permissions.canMove) {
+      return "ambient_reaction";
+    }
     return "internal_reaction";
   }
 
@@ -526,6 +565,14 @@ export function chooseDeterministicPetAction(observation: AgentObservation): Pet
 
   if (responseLevel === "observe_only" || responseLevel === "internal_reaction") {
     return null;
+  }
+
+  // Pursue a persistent goal first: the engine carries it across ticks (walk to a
+  // desk, then work) without re-deriving from scratch. Returns null when the goal
+  // is done/blocked, so the rest of the policy can pick the next thing to do.
+  const goalAction = deriveActionFromGoal(observation);
+  if (goalAction) {
+    return goalAction;
   }
 
   const canTakeTaskAction = responseLevel === "task_action" || responseLevel === "social_response";
@@ -562,11 +609,15 @@ export function chooseDeterministicPetAction(observation: AgentObservation): Pet
 
     const desk = nearestDesk(observation.desks, pet.position);
     if (desk && !atDesk(pet.position, desk.position)) {
-      const step = stepToward(pet.position, desk.position, room);
+      // Already walking somewhere? Let the physics step carry the pet there
+      // instead of re-issuing a course every tick.
+      if (pet.status === "moving" && pet.path.length > 0) {
+        return null;
+      }
       return {
         action: "move",
-        x: step.x,
-        y: step.y,
+        x: desk.position.x,
+        y: desk.position.y,
         reasonVisible: `${pet.name} heads to a desk before working.`,
         riskLevel: "low"
       };
@@ -615,6 +666,47 @@ export function chooseDeterministicPetAction(observation: AgentObservation): Pet
       reasonVisible: `${pet.name} continues focused work at the desk.`,
       riskLevel: observation.currentTask.riskLevel
     };
+  }
+
+  // Intrinsic drives: with no owned task to push, a low need pulls the pet toward
+  // a restoring action so quiet ticks stay in-character instead of idle.
+  const low = lowestNeed(pet.needs);
+  if (!pet.currentTaskId && low.value < NEED_WANT_THRESHOLD) {
+    // Social hunger → reach out to a nearby pet.
+    if (low.key === "social" && observation.nearbyPets[0]) {
+      if (pet.permissions.canOfferHelp) {
+        return {
+          action: "offer_help",
+          targetPetId: observation.nearbyPets[0].id,
+          taskId: observation.openTasks[0]?.id ?? "general-help",
+          message: "Mind some company while you work?",
+          reasonVisible: `${pet.name} is feeling social and drifts over.`,
+          riskLevel: "low"
+        };
+      }
+      if (pet.permissions.canSpeak) {
+        return {
+          action: "say",
+          message: socialLineFor(pet),
+          targetPetId: observation.nearbyPets[0].id,
+          reasonVisible: `${pet.name} is feeling social and strikes up a chat.`,
+          riskLevel: "low"
+        };
+      }
+    }
+
+    // Energy hunger → head for a couch to rest, if one is in sight.
+    if (low.key === "energy" && pet.permissions.canMove) {
+      const couch = observation.objectsNearby.find((object) => object.type === "couch");
+      if (couch && distance(pet.position, couch.position) > 0) {
+        return {
+          action: "move_to",
+          targetObjectId: couch.id,
+          reasonVisible: `${pet.name} is low on energy and heads for the couch.`,
+          riskLevel: "low"
+        };
+      }
+    }
   }
 
   if (responseLevel === "social_response" && pet.permissions.canOfferHelp && pet.traits.socialStyle === "helpful") {
@@ -753,6 +845,23 @@ export function validatePetAction(snapshot: RoomSnapshot, petId: string, propose
       validateTaskExists(snapshot, action.taskId, errors);
       validateOtherPet(snapshot, pet.id, action.targetPetId, errors);
       break;
+    case "set_goal":
+      // A goal target, when present, must reference a real task or pet so the
+      // engine never decomposes a goal against a fabricated id.
+      if (action.targetId) {
+        const isTask = snapshot.tasks.some((task) => task.id === action.targetId);
+        const isPet = snapshot.pets.some((candidate) => candidate.id === action.targetId);
+        if (!isTask && !isPet) {
+          errors.push("Goal target does not exist.");
+        }
+        if (action.kind === "work_task" && !isTask) {
+          errors.push("A work_task goal must target a task.");
+        }
+        if (action.kind === "socialize" && !isPet) {
+          errors.push("A socialize goal must target a pet.");
+        }
+      }
+      break;
   }
 
   if (errors.length > 0) {
@@ -810,31 +919,61 @@ export function applyPetAction(
         })
       );
       break;
-    case "move":
-      next = { ...next, pets: updatePet(next.pets, petId, { status: "moving", position: { x: action.x, y: action.y } }) };
+    case "move": {
+      // Set a course; the deterministic physics step (advanceLocomotion) walks
+      // the pet one tile per tick. Position is NOT mutated here.
+      const destination = { x: action.x, y: action.y };
+      const path = findPath(actor.position, destination, next.room);
+      const arrived = path.length === 0;
+      next = {
+        ...next,
+        pets: updatePet(next.pets, petId, {
+          status: arrived ? actor.status : "moving",
+          destination: arrived ? null : destination,
+          path
+        })
+      };
       emit(
         createWorldEvent({
           snapshot: next,
           type: "PetMoved",
           timestamp,
           actorPetId: petId,
-          payload: { from: actor.position, to: { x: action.x, y: action.y }, reasonVisible: action.reasonVisible },
+          payload: { from: actor.position, to: actor.position, destination, steps: path.length, reasonVisible: action.reasonVisible },
           visibility: "room",
           significance: "low"
         })
       );
       break;
+    }
     case "move_to": {
       const targetObj = snapshot.objects.find((object) => object.id === action.targetObjectId);
       if (targetObj) {
-        next = { ...next, pets: updatePet(next.pets, petId, { status: "moving", position: { ...targetObj.position } }) };
+        const destination = { ...targetObj.position };
+        const path = findPath(actor.position, destination, next.room);
+        const arrived = path.length === 0;
+        next = {
+          ...next,
+          pets: updatePet(next.pets, petId, {
+            status: arrived ? actor.status : "moving",
+            destination: arrived ? null : destination,
+            path
+          })
+        };
         emit(
           createWorldEvent({
             snapshot: next,
             type: "PetMoved",
             timestamp,
             actorPetId: petId,
-            payload: { from: actor.position, to: targetObj.position, targetObjectId: action.targetObjectId, reasonVisible: action.reasonVisible },
+            payload: {
+              from: actor.position,
+              to: actor.position,
+              destination,
+              steps: path.length,
+              targetObjectId: action.targetObjectId,
+              reasonVisible: action.reasonVisible
+            },
             visibility: "room",
             significance: "low"
           })
@@ -1100,6 +1239,28 @@ export function applyPetAction(
       );
       next = bumpRelationship(next, petId, action.targetPetId, { affinity: 1, note: "handed off task" }, timestamp);
       break;
+    case "set_goal": {
+      const goal = {
+        kind: action.kind,
+        targetId: action.targetId ?? null,
+        targetPosition: null,
+        createdTick: next.room.tick
+      };
+      next = { ...next, pets: updatePet(next.pets, petId, { goal }) };
+      emit(
+        createWorldEvent({
+          snapshot: next,
+          type: "PetGoalSet",
+          timestamp,
+          actorPetId: petId,
+          targetId: action.targetId ?? null,
+          payload: { kind: action.kind, targetId: action.targetId ?? null, reasonVisible: action.reasonVisible, summary: `${actor.name} set a goal: ${action.kind}.` },
+          visibility: "system",
+          significance: "low"
+        })
+      );
+      break;
+    }
   }
 
   const primary = created[0] as WorldEvent;
@@ -1113,6 +1274,80 @@ export function applyPetAction(
     event: primary,
     events: created
   };
+}
+
+/**
+ * Deterministic physics step (no model calls): every active pet with a pending
+ * `path` advances exactly one tile this tick, emitting a `PetMoved`. On the tile
+ * that empties the path, the pet's `destination` is cleared and a `PetArrived`
+ * event fires. This is what turns a single `move`/`move_to` intent into smooth
+ * multi-tick locomotion. Runs at the top of every tick, before cognition.
+ */
+export function advanceLocomotion(
+  snapshot: RoomSnapshot,
+  timestamp: string = new Date().toISOString()
+): { snapshot: RoomSnapshot; events: WorldEvent[] } {
+  if (snapshot.room.paused) {
+    return { snapshot, events: [] };
+  }
+
+  let next = snapshot;
+  const events: WorldEvent[] = [];
+
+  for (const pet of snapshot.pets) {
+    if (pet.archived || pet.status === "paused" || pet.path.length === 0) {
+      continue;
+    }
+    // Read the live copy (earlier pets in this loop may have mutated `next`).
+    const current = next.pets.find((candidate) => candidate.id === pet.id);
+    if (!current || current.path.length === 0) {
+      continue;
+    }
+
+    const [step, ...rest] = current.path;
+    if (!step) {
+      continue;
+    }
+    const from = current.position;
+    const arrived = rest.length === 0;
+    next = {
+      ...next,
+      pets: updatePet(next.pets, pet.id, {
+        position: step,
+        path: rest,
+        destination: arrived ? null : current.destination,
+        status: arrived && current.status === "moving" ? "idle" : current.status
+      })
+    };
+
+    const moved = createWorldEvent({
+      snapshot: next,
+      type: "PetMoved",
+      timestamp,
+      actorPetId: pet.id,
+      payload: { from, to: step, destination: current.destination, remaining: rest.length },
+      visibility: "room",
+      significance: "low"
+    });
+    next = appendEvent(next, moved);
+    events.push(moved);
+
+    if (arrived) {
+      const arrivedEvent = createWorldEvent({
+        snapshot: next,
+        type: "PetArrived",
+        timestamp,
+        actorPetId: pet.id,
+        payload: { at: step, summary: `${current.name} arrived at ${step.x},${step.y}.` },
+        visibility: "room",
+        significance: "low"
+      });
+      next = appendEvent(next, arrivedEvent);
+      events.push(arrivedEvent);
+    }
+  }
+
+  return { snapshot: next, events };
 }
 
 export function runDeterministicTick(snapshot: RoomSnapshot, timestamp: string = new Date().toISOString()): RoomSnapshot {
@@ -1133,7 +1368,11 @@ export function runDeterministicTick(snapshot: RoomSnapshot, timestamp: string =
     })
   );
 
+  // Physics before cognition: walk everyone one tile, then decay drives.
   const tickEvent = latestEvent(next);
+  next = advanceLocomotion(next, timestamp).snapshot;
+  next = decayNeeds(next);
+
   for (const pet of next.pets.filter((candidate) => !candidate.archived)) {
     const observation = buildObservation(next, pet.id, tickEvent);
     const action = chooseDeterministicPetAction(observation);
@@ -1249,7 +1488,8 @@ function availableActionsForPet(pet: Pet): AvailableAction[] {
     pet.permissions.canWork ? "propose_plan" : null,
     pet.permissions.canWork ? "request_review" : null,
     pet.permissions.canAskHelp ? "accept_help" : null,
-    pet.permissions.canWork ? "handoff_task" : null
+    pet.permissions.canWork ? "handoff_task" : null,
+    "set_goal"
   ];
   return actions.filter((action): action is AvailableAction => action !== null);
 }
@@ -1326,19 +1566,6 @@ function nearestDesk(desks: WorldObject[], position: Position): WorldObject | un
 
 function atDesk(position: Position, deskPosition: Position): boolean {
   return distance(position, deskPosition) <= 1;
-}
-
-function stepToward(from: Position, to: Position, room: { width: number; height: number }): Position {
-  let { x, y } = from;
-  if (x !== to.x) {
-    x += Math.sign(to.x - x);
-  } else if (y !== to.y) {
-    y += Math.sign(to.y - y);
-  }
-  return {
-    x: Math.max(0, Math.min(room.width - 1, x)),
-    y: Math.max(0, Math.min(room.height - 1, y))
-  };
 }
 
 function nextStep(position: Position, width: number, height: number, seed: number): Position {

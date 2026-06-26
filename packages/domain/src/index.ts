@@ -1,5 +1,7 @@
 export * from "./helpers.js";
 export * from "./kernel.js";
+export * from "./needs.js";
+export * from "./goals.js";
 export * from "./karma.js";
 export * from "./skills.js";
 export * from "./tasks.js";

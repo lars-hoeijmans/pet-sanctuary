@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  advanceLocomotion,
   applyPetAction,
   buildObservation,
   classifyResponseLevel,
@@ -8,6 +9,7 @@ import {
   processWorldEvent,
   runDeterministicTick
 } from "./kernel.js";
+import { findPath } from "./helpers.js";
 
 describe("Living Room Kernel domain", () => {
   it("seeds one persistent room with distinct pets, objects, and an initial trace", () => {
@@ -129,7 +131,7 @@ describe("Living Room Kernel domain", () => {
     expect(proposedByPet).not.toContain("pet-byte");
   });
 
-  it("moves a pet fully to an object with move_to action", () => {
+  it("move_to sets a destination + path without teleporting, then physics walks it tile by tile", () => {
     const snapshot = createSeedRoomSnapshot("2026-06-26T12:00:00.000Z");
     const mochi = snapshot.pets.find((pet) => pet.id === "pet-mochi")!;
     const greenCouch = snapshot.objects.find((obj) => obj.id === "obj-green-couch")!;
@@ -143,16 +145,52 @@ describe("Living Room Kernel domain", () => {
       {
         action: "move_to",
         targetObjectId: "obj-green-couch",
-        reasonVisible: "Mochi moves fully to the green couch.",
+        reasonVisible: "Mochi heads for the green couch.",
         riskLevel: "low"
       },
       "2026-06-26T12:05:00.000Z"
     );
 
     expect(result.ok).toBe(true);
-    expect(result.snapshot.pets.find((pet) => pet.id === "pet-mochi")?.position).toEqual({ x: 3, y: 5 });
+    const heading = result.snapshot.pets.find((pet) => pet.id === "pet-mochi")!;
+    // Course is set; position is unchanged this tick (no teleport).
+    expect(heading.position).toEqual({ x: 2, y: 4 });
+    expect(heading.destination).toEqual({ x: 3, y: 5 });
+    expect(heading.path.length).toBe(2); // (2,4) -> (3,4) -> (3,5)
+    expect(heading.status).toBe("moving");
     expect(result.event.type).toBe("PetMoved");
     expect(result.event.payload.targetObjectId).toBe("obj-green-couch");
+
+    // Tick 1 of physics: one tile closer, still en route.
+    const step1 = advanceLocomotion(result.snapshot, "2026-06-26T12:05:10.000Z");
+    const afterStep1 = step1.snapshot.pets.find((pet) => pet.id === "pet-mochi")!;
+    expect(afterStep1.position).toEqual({ x: 3, y: 4 });
+    expect(afterStep1.path.length).toBe(1);
+    expect(afterStep1.destination).toEqual({ x: 3, y: 5 });
+    expect(step1.events.some((event) => event.type === "PetMoved")).toBe(true);
+    expect(step1.events.some((event) => event.type === "PetArrived")).toBe(false);
+
+    // Tick 2 of physics: arrival — position reached, destination cleared, event fired.
+    const step2 = advanceLocomotion(step1.snapshot, "2026-06-26T12:05:20.000Z");
+    const arrived = step2.snapshot.pets.find((pet) => pet.id === "pet-mochi")!;
+    expect(arrived.position).toEqual({ x: 3, y: 5 });
+    expect(arrived.path).toEqual([]);
+    expect(arrived.destination).toBeNull();
+    expect(arrived.status).toBe("idle");
+    expect(step2.events.some((event) => event.type === "PetArrived")).toBe(true);
+  });
+
+  it("findPath returns a deterministic route excluding the start and including the target", () => {
+    const room = { width: 12, height: 8 };
+    const path = findPath({ x: 2, y: 4 }, { x: 3, y: 5 }, room);
+    expect(path).toEqual([
+      { x: 3, y: 4 },
+      { x: 3, y: 5 }
+    ]);
+    // Manhattan distance = path length.
+    expect(findPath({ x: 0, y: 0 }, { x: 5, y: 3 }, room).length).toBe(8);
+    // Same tile => empty path.
+    expect(findPath({ x: 1, y: 1 }, { x: 1, y: 1 }, room)).toEqual([]);
   });
 
   it("keeps invalid proposed actions non-mutating and visible in the event cascade", () => {

@@ -96,6 +96,74 @@ export function distance(a: Position, b: Position): number {
   return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
 }
 
+function positionKey(position: Position): string {
+  return `${position.x},${position.y}`;
+}
+
+/**
+ * Deterministic shortest-path on the room grid (4-connected BFS). Returns the
+ * route from `from` to `to` **excluding** `from` and **including** `to`, so the
+ * physics step can pop one tile per tick. Neighbours are explored x-before-y to
+ * match the legacy `stepToward` ordering, keeping movement stable/replayable.
+ *
+ * `blocked` is a set of "x,y" tile keys to treat as impassable; it is currently
+ * passed empty (object tiles are valid destinations) but kept as a seam for
+ * future obstacle avoidance. Returns [] when `to` is unreachable or equals `from`.
+ */
+export function findPath(
+  from: Position,
+  to: Position,
+  room: { width: number; height: number },
+  blocked: Set<string> = new Set()
+): Position[] {
+  if (from.x === to.x && from.y === to.y) {
+    return [];
+  }
+
+  const toKey = positionKey(to);
+  const startKey = positionKey(from);
+  const visited = new Set<string>([startKey]);
+  const cameFrom = new Map<string, Position>();
+  const queue: Position[] = [from];
+
+  while (queue.length > 0) {
+    const current = queue.shift() as Position;
+    if (positionKey(current) === toKey) {
+      // Reconstruct, then drop the start tile.
+      const reversed: Position[] = [];
+      let cursor: Position | undefined = current;
+      while (cursor && positionKey(cursor) !== startKey) {
+        reversed.push(cursor);
+        cursor = cameFrom.get(positionKey(cursor));
+      }
+      return reversed.reverse();
+    }
+
+    // x-before-y neighbour order (matches stepToward: horizontal first).
+    const neighbours: Position[] = [
+      { x: current.x - 1, y: current.y },
+      { x: current.x + 1, y: current.y },
+      { x: current.x, y: current.y - 1 },
+      { x: current.x, y: current.y + 1 }
+    ];
+    for (const neighbour of neighbours) {
+      if (neighbour.x < 0 || neighbour.y < 0 || neighbour.x >= room.width || neighbour.y >= room.height) {
+        continue;
+      }
+      const key = positionKey(neighbour);
+      // The destination is always enterable even if otherwise "blocked".
+      if (visited.has(key) || (blocked.has(key) && key !== toKey)) {
+        continue;
+      }
+      visited.add(key);
+      cameFrom.set(key, current);
+      queue.push(neighbour);
+    }
+  }
+
+  return [];
+}
+
 export function isNearby(snapshot: RoomSnapshot, petId: string, otherPetId: string, radius: number): boolean {
   const pet = requirePet(snapshot, petId);
   const other = requirePet(snapshot, otherPetId);

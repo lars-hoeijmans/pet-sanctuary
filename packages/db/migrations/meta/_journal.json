@@ -22,6 +22,27 @@
       "when": 1782479460314,
       "tag": "0002_wise_hex",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1782488748213,
+      "tag": "0003_absurd_doctor_strange",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1782489472310,
+      "tag": "0004_good_jackpot",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1782489874240,
+      "tag": "0005_familiar_robin_chapel",
+      "breakpoints": true
     }
   ]
 }

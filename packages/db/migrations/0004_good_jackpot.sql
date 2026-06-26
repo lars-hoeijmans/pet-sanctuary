@@ -1,0 +1,1 @@
+ALTER TABLE "pets" ADD COLUMN "needs" jsonb DEFAULT '{"energy":100,"focus":100,"social":100,"curiosity":100}'::jsonb NOT NULL;

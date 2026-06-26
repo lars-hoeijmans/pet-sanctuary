@@ -11,7 +11,9 @@ import {
 import type {
   Approval,
   Pet,
+  PetGoal,
   PetMemory,
+  PetNeeds,
   PetPermissions,
   PetRuntimeConfig,
   PetTraits,
@@ -46,6 +48,13 @@ export const pets = pgTable(
     karma: integer("karma").notNull().default(0),
     permissions: jsonb("permissions").$type<PetPermissions>().notNull(),
     position: jsonb("position").$type<Position>().notNull(),
+    destination: jsonb("destination").$type<Position | null>(),
+    path: jsonb("path").$type<Position[]>().notNull().default([]),
+    needs: jsonb("needs")
+      .$type<PetNeeds>()
+      .notNull()
+      .default({ energy: 100, focus: 100, social: 100, curiosity: 100 }),
+    goal: jsonb("goal").$type<PetGoal | null>(),
     currentTaskId: text("current_task_id"),
     memory: jsonb("memory").$type<PetMemory>().notNull(),
     runtime: jsonb("runtime").$type<PetRuntimeConfig>().notNull().default({ kind: "deterministic", model: null, provider: null }),

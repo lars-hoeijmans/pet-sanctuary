@@ -86,6 +86,15 @@ export const SEED_SNAPSHOT: RoomSnapshot = {
       state: "active"
     },
     {
+      id: "desk-3",
+      label: "Tiny Desk",
+      kind: "desk",
+      position: { x: 5, y: 5 },
+      width: 1,
+      height: 1,
+      state: "ready"
+    },
+    {
       id: "couch-1",
       label: "Green Couch",
       kind: "seat",

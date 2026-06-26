@@ -45,7 +45,8 @@ const ACTION_SHAPES = `Allowed action JSON shapes (choose exactly ONE, include "
 - {"action":"ask_help","targetPetId":"<id>","taskId":"<id>","message?:"...","reasonVisible":"...","riskLevel":"low"}
 - {"action":"request_review","targetPetId":"<id>","taskId":"<id>","reasonVisible":"...","riskLevel":"low"}
 - {"action":"reflect","memoryNote":"<=240 chars","reasonVisible":"...","riskLevel":"low"}
-- {"action":"decorate","objectId":"<id>","style":"<=80 chars","reasonVisible":"...","riskLevel":"low"}`;
+- {"action":"decorate","objectId":"<id>","style":"<=80 chars","reasonVisible":"...","riskLevel":"low"}
+- {"action":"set_goal","kind":"work_task|socialize|rest|explore|reflect|idle","targetId?:"<task or pet id>","reasonVisible":"...","riskLevel":"low"}`;
 
 /**
  * Ask the model, as this pet, to propose ONE in-character action for the current
@@ -61,6 +62,8 @@ export function buildDecidePrompt(observation: AgentObservation): string {
   const current = observation.currentTask
     ? `${observation.currentTask.id}: "${observation.currentTask.title}" [${observation.currentTask.status}]`
     : "none";
+  const goal = pet.goal ? `${pet.goal.kind}${pet.goal.targetId ? ` -> ${pet.goal.targetId}` : ""}` : "none";
+  const needs = `energy ${pet.needs.energy}, focus ${pet.needs.focus}, social ${pet.needs.social}, curiosity ${pet.needs.curiosity}`;
   const allowed = observation.availableActions.join(", ");
 
   return `You ARE the pet "${pet.name}" living in a shared virtual room. Stay fully in character.
@@ -78,8 +81,14 @@ WORLD (room ${room.width}x${room.height}, your position ${pet.position.x},${pet.
 - Desks: ${desks.join("; ") || "none"}
 - Open tasks you could claim: ${openTasks.join("; ") || "none"}
 - Your current task: ${current}
+- Your drives: ${needs}
+- Your current goal: ${goal}
 - Recent events:
 ${recent}
+
+If you already have a goal, the world carries it out for you automatically — only
+choose a new "set_goal" when you have no goal or your goal just finished. Let a low
+drive (e.g. low social → socialize, low energy → rest) steer the goal you pick.
 
 YOUR RESPONSE LEVEL THIS TURN: ${responseLevel}
 - ambient_reaction → a short in-character aside ("say") or a small "move".

@@ -74,4 +74,30 @@ describe("LivingRoomService", () => {
     expect(persisted.snapshot.events).toEqual(response.snapshot.events);
     expect(published).toEqual(createdEvents.map((event) => event.type));
   });
+
+  it("walks an assigned pet to a desk (locomotion) and drives the task to completion", async () => {
+    const service = new LivingRoomService(new InMemoryLivingRoomRepository());
+
+    await service.createTask({
+      title: "Polish the trace",
+      description: "",
+      riskLevel: "low",
+      assignedPetId: "pet-byte"
+    });
+    // The task lifecycle runs in a background exclusive block; chaining another
+    // exclusive call guarantees it has finished before we assert.
+    await service.resume();
+
+    const room = await service.getMainRoom();
+    const task = room.snapshot.tasks.find((candidate) => candidate.assignedPetId === "pet-byte");
+    expect(task?.status).toBe("completed");
+
+    // Locomotion is now state-driven: the pet physically walked (one tile per
+    // physics step) and the run actually started at the desk.
+    const types = room.snapshot.events.map((event) => event.type);
+    expect(types).toContain("PetMoved");
+    expect(types).toContain("PetArrived");
+    expect(types).toContain("PetStartedWork");
+    expect(types).toContain("TaskCompleted");
+  });
 });
