@@ -31,6 +31,7 @@ import { learnSkill } from "./skills.js";
 import { getTask, updateTask } from "./tasks.js";
 import { bumpRelationship } from "./relationships.js";
 import { DEFAULT_PERMISSIONS } from "./pet-generation.js";
+import { canPlaceObject } from "./placement.js";
 
 export type ValidationResult =
   | { ok: true; action: PetAction }
@@ -714,7 +715,14 @@ export function validatePetAction(snapshot: RoomSnapshot, petId: string, propose
       break;
     case "build":
       if (!pet.permissions.canBuild) errors.push(`${pet.name} cannot build.`);
-      if (!isInsideRoom(snapshot, action.location)) errors.push("Build location is outside the room bounds.");
+      if (!isInsideRoom(snapshot, action.location)) {
+        errors.push("Build location is outside the room bounds.");
+      } else {
+        const placement = canPlaceObject(snapshot, action.objectType, action.location);
+        if (!placement.ok) {
+          errors.push(placement.reason);
+        }
+      }
       break;
     case "decorate":
       if (!pet.permissions.canDecorate) errors.push(`${pet.name} cannot decorate.`);
