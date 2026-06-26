@@ -9,17 +9,36 @@ import {
   type ResponseLevel,
   type RoomSnapshot,
   RoomSnapshotSchema,
+  type Skill,
+  type Task,
   type WorldEvent,
   type WorldObject
 } from "@pet-sanctuary/contracts";
+import {
+  appendEvent,
+  createWorldEvent,
+  distance,
+  isInsideRoom,
+  isNearby,
+  latestEvent,
+  replaceEvent,
+  requirePet,
+  stableNumber,
+  updatePet
+} from "./helpers.js";
+import { applyKarmaForEvents } from "./karma.js";
+import { learnSkill } from "./skills.js";
+import { getTask, updateTask } from "./tasks.js";
+import { bumpRelationship } from "./relationships.js";
+import { DEFAULT_PERMISSIONS } from "./pet-generation.js";
 
 export type ValidationResult =
   | { ok: true; action: PetAction }
   | { ok: false; errors: string[]; event: WorldEvent };
 
 export type ApplyActionResult =
-  | { ok: true; snapshot: RoomSnapshot; event: WorldEvent }
-  | { ok: false; snapshot: RoomSnapshot; errors: string[]; event: WorldEvent };
+  | { ok: true; snapshot: RoomSnapshot; event: WorldEvent; events: WorldEvent[] }
+  | { ok: false; snapshot: RoomSnapshot; errors: string[]; event: WorldEvent; events: WorldEvent[] };
 
 export interface ProcessWorldEventOptions {
   chooseAction?: (observation: AgentObservation) => PetAction | null;
@@ -32,18 +51,6 @@ export interface ProcessWorldEventResult {
 }
 
 export const SEED_ROOM_ID = "living-room";
-
-const defaultPermissions = {
-  canSpeak: true,
-  canMove: true,
-  canWork: true,
-  canAskHelp: true,
-  canOfferHelp: true,
-  canBuild: true,
-  canDecorate: true,
-  canRequestSkill: true,
-  canReflect: true
-};
 
 export function createSeedRoomSnapshot(timestamp: string = new Date().toISOString()): RoomSnapshot {
   const room = {
@@ -73,13 +80,15 @@ export function createSeedRoomSnapshot(timestamp: string = new Date().toISOStrin
       sprite: "seed-mochi",
       status: "idle",
       karma: 3,
-      permissions: defaultPermissions,
+      permissions: DEFAULT_PERMISSIONS,
       position: { x: 2, y: 4 },
       currentTaskId: null,
       memory: {
         summary: "Remembers that helpful actions should leave the room easier to understand.",
         notes: ["Started in the Living Room Kernel seed."]
-      }
+      },
+      runtime: { kind: "deterministic", model: null, provider: null },
+      archived: false
     },
     {
       id: "pet-byte",
@@ -98,13 +107,15 @@ export function createSeedRoomSnapshot(timestamp: string = new Date().toISOStrin
       sprite: "seed-byte",
       status: "idle",
       karma: 2,
-      permissions: defaultPermissions,
+      permissions: DEFAULT_PERMISSIONS,
       position: { x: 5, y: 3 },
       currentTaskId: null,
       memory: {
         summary: "Remembers to review behavior through visible events rather than private chats.",
         notes: ["Started in the Living Room Kernel seed."]
-      }
+      },
+      runtime: { kind: "deterministic", model: null, provider: null },
+      archived: false
     },
     {
       id: "pet-nova",
@@ -123,13 +134,15 @@ export function createSeedRoomSnapshot(timestamp: string = new Date().toISOStrin
       sprite: "seed-nova",
       status: "idle",
       karma: 1,
-      permissions: defaultPermissions,
+      permissions: DEFAULT_PERMISSIONS,
       position: { x: 8, y: 5 },
       currentTaskId: null,
       memory: {
         summary: "Remembers that debugging starts by making traces visible.",
         notes: ["Started in the Living Room Kernel seed."]
-      }
+      },
+      runtime: { kind: "deterministic", model: null, provider: null },
+      archived: false
     }
   ];
 
@@ -172,8 +185,19 @@ export function createSeedRoomSnapshot(timestamp: string = new Date().toISOStrin
     }
   ];
 
+  // Each seed pet starts with two virtual (auto-active) skills so skill growth is
+  // visible from the very first frame.
+  const skills: Skill[] = [
+    seedSkill("pet-mochi", 1, "Small safe increments", "Break work into tiny reversible steps.", "Keep changes easy to review.", timestamp),
+    seedSkill("pet-mochi", 2, "Offer bounded help", "Offer to help in a small, traceable way.", "Support others without taking over.", timestamp),
+    seedSkill("pet-byte", 1, "Edge-case review pass", "Scan for the cases others miss.", "Catch problems before they ship.", timestamp),
+    seedSkill("pet-byte", 2, "Name the tradeoffs", "Explain why one path beats another.", "Help others learn, not just finish.", timestamp),
+    seedSkill("pet-nova", 1, "Make traces visible first", "Reproduce and log before concluding.", "Turn uncertainty into evidence.", timestamp),
+    seedSkill("pet-nova", 2, "Set a friendly pace", "Turn rivalry into momentum.", "Push the room to finish tasks.", timestamp)
+  ];
+
   const events: WorldEvent[] = [
-    createEvent({
+    createWorldEvent({
       snapshot: { room, events: [] },
       type: "RoomSeeded",
       timestamp,
@@ -186,7 +210,32 @@ export function createSeedRoomSnapshot(timestamp: string = new Date().toISOStrin
     })
   ];
 
-  return RoomSnapshotSchema.parse({ room, pets, objects, events });
+  return RoomSnapshotSchema.parse({ room, pets, objects, events, skills, tasks: [], approvals: [], relationships: [] });
+}
+
+function seedSkill(
+  petId: string,
+  index: number,
+  name: string,
+  description: string,
+  purpose: string,
+  timestamp: string
+): Skill {
+  return {
+    id: `skill-${petId}-${index}`,
+    petId,
+    name,
+    description,
+    purpose,
+    source: "seed",
+    status: "active",
+    riskLevel: "low",
+    version: 1,
+    usageCount: 0,
+    triggeringEventId: null,
+    createdAt: timestamp,
+    lastUsedAt: null
+  };
 }
 
 export function createRoomNoticeEvent(
@@ -194,7 +243,7 @@ export function createRoomNoticeEvent(
   request: CreateRoomEventRequest,
   timestamp: string = new Date().toISOString()
 ): WorldEvent {
-  return createEvent({
+  return createWorldEvent({
     snapshot,
     type: "RoomNotice",
     timestamp,
@@ -225,7 +274,7 @@ export function processWorldEvent(
     events.push(event);
   }
 
-  for (const pet of next.pets.filter((candidate) => candidate.status !== "paused")) {
+  for (const pet of next.pets.filter((candidate) => candidate.status !== "paused" && !candidate.archived)) {
     const observation = buildObservation(next, pet.id, event);
     const perceived = createPerceptionEvent(next, pet, event, observation.responseLevel, timestamp);
     next = appendEvent(next, perceived);
@@ -241,9 +290,11 @@ export function processWorldEvent(
     }
 
     const result = applyPetAction(next, pet.id, action, timestamp);
-    const annotatedEvent = annotateTriggeredResponse(result.event, event, observation.responseLevel);
-    next = replaceEvent(result.snapshot, annotatedEvent);
-    events.push(annotatedEvent);
+    const annotatedPrimary = annotateTriggeredResponse(result.event, event, observation.responseLevel);
+    next = replaceEvent(result.snapshot, annotatedPrimary);
+    for (const created of result.events) {
+      events.push(created.id === result.event.id ? annotatedPrimary : created);
+    }
   }
 
   return {
@@ -265,11 +316,16 @@ export function buildObservation(
   return {
     room: snapshot.room,
     pet,
-    nearbyPets: snapshot.pets.filter((candidate) => candidate.id !== pet.id && distance(candidate.position, pet.position) <= radius),
+    nearbyPets: snapshot.pets.filter(
+      (candidate) => candidate.id !== pet.id && !candidate.archived && distance(candidate.position, pet.position) <= radius
+    ),
     objectsNearby: snapshot.objects.filter((object) => distance(object.position, pet.position) <= radius),
+    desks: snapshot.objects.filter((object) => object.type === "desk"),
     recentEvents: snapshot.events.slice(-8),
     availableActions: availableActionsForPet(pet),
-    responseLevel
+    responseLevel,
+    openTasks: snapshot.tasks.filter((task) => task.status === "open" && !task.assignedPetId),
+    currentTask: pet.currentTaskId ? getTask(snapshot, pet.currentTaskId) ?? null : null
   };
 }
 
@@ -280,7 +336,7 @@ export function classifyResponseLevel(
 ): ResponseLevel {
   const pet = requirePet(snapshot, petId);
 
-  if (snapshot.room.paused || pet.status === "paused") {
+  if (snapshot.room.paused || pet.status === "paused" || pet.archived) {
     return "observe_only";
   }
 
@@ -338,6 +394,78 @@ export function chooseDeterministicPetAction(observation: AgentObservation): Pet
     return null;
   }
 
+  const canTakeTaskAction = responseLevel === "task_action" || responseLevel === "social_response";
+
+  // 1. Claim an open task if this pet's personality leans toward grabbing work.
+  const claimable = observation.openTasks[0];
+  if (claimable && pet.permissions.canWork && !pet.currentTaskId && canTakeTaskAction && wantsToClaim(pet)) {
+    return {
+      action: "claim_task",
+      taskId: claimable.id,
+      reasonVisible: `${pet.name} claims "${claimable.title}" to get it moving.`,
+      riskLevel: "low"
+    };
+  }
+
+  // 2. Drive a task this pet already owns: plan -> walk to a desk -> work.
+  const myTask = observation.currentTask;
+  if (
+    myTask &&
+    pet.permissions.canWork &&
+    (responseLevel === "task_action" || responseLevel === "social_response" || responseLevel === "ambient_reaction") &&
+    (myTask.status === "claimed" || myTask.status === "planned")
+  ) {
+    // Planners draft a plan before moving.
+    if (myTask.status === "claimed" && pet.traits.workStyle === "planner" && !myTask.planSummary) {
+      return {
+        action: "propose_plan",
+        taskId: myTask.id,
+        summary: `${pet.name} will tackle "${myTask.title}" in small, reviewable steps.`,
+        reasonVisible: `${pet.name} plans before acting.`,
+        riskLevel: "low"
+      };
+    }
+
+    const desk = nearestDesk(observation.desks, pet.position);
+    if (desk && !atDesk(pet.position, desk.position)) {
+      const step = stepToward(pet.position, desk.position, room);
+      return {
+        action: "move",
+        x: step.x,
+        y: step.y,
+        reasonVisible: `${pet.name} heads to a desk before working.`,
+        riskLevel: "low"
+      };
+    }
+
+    return {
+      action: "work",
+      taskId: myTask.id,
+      reasonVisible: `${pet.name} settles at the desk and starts "${myTask.title}".`,
+      riskLevel: myTask.riskLevel
+    };
+  }
+
+  // 3. Reviewers/mentors offer help on a claimable task instead of grabbing it.
+  if (
+    claimable &&
+    canTakeTaskAction &&
+    pet.permissions.canOfferHelp &&
+    (pet.traits.workStyle === "reviewer" || pet.traits.socialStyle === "mentor-like" || pet.traits.socialStyle === "helpful")
+  ) {
+    const target = observation.nearbyPets[0];
+    if (target) {
+      return {
+        action: "offer_help",
+        targetPetId: target.id,
+        taskId: claimable.id,
+        message: "I can review the edge cases while you build.",
+        reasonVisible: `${pet.name} prefers to support rather than claim.`,
+        riskLevel: "low"
+      };
+    }
+  }
+
   if (responseLevel === "task_action" && pet.permissions.canWork) {
     return {
       action: "work",
@@ -348,7 +476,9 @@ export function chooseDeterministicPetAction(observation: AgentObservation): Pet
   }
 
   if (responseLevel === "social_response" && pet.permissions.canOfferHelp && pet.traits.socialStyle === "helpful") {
-    const target = observation.nearbyPets[0] ?? observation.recentEvents.map((event) => event.actorPetId).filter(Boolean).find((id) => id !== pet.id);
+    const target =
+      observation.nearbyPets[0] ??
+      observation.recentEvents.map((event) => event.actorPetId).filter(Boolean).find((id) => id !== pet.id);
     if (target) {
       return {
         action: "offer_help",
@@ -398,6 +528,10 @@ export function validatePetAction(snapshot: RoomSnapshot, petId: string, propose
     errors.push("Simulation is paused.");
   }
 
+  if (pet.archived) {
+    errors.push(`${pet.name} is archived.`);
+  }
+
   switch (action.action) {
     case "say":
       if (!pet.permissions.canSpeak) errors.push(`${pet.name} cannot speak.`);
@@ -434,6 +568,33 @@ export function validatePetAction(snapshot: RoomSnapshot, petId: string, propose
     case "reflect":
       if (!pet.permissions.canReflect) errors.push(`${pet.name} cannot reflect.`);
       break;
+    case "claim_task":
+      if (!pet.permissions.canWork) errors.push(`${pet.name} cannot work.`);
+      validateClaimable(snapshot, pet.id, action.taskId, errors);
+      break;
+    case "decline_task":
+      if (!pet.permissions.canWork) errors.push(`${pet.name} cannot work.`);
+      validateTaskExists(snapshot, action.taskId, errors);
+      break;
+    case "propose_plan":
+      if (!pet.permissions.canWork) errors.push(`${pet.name} cannot work.`);
+      validateTaskExists(snapshot, action.taskId, errors);
+      break;
+    case "request_review":
+      if (!pet.permissions.canWork) errors.push(`${pet.name} cannot request review.`);
+      validateTaskExists(snapshot, action.taskId, errors);
+      validateOtherPet(snapshot, pet.id, action.targetPetId, errors);
+      break;
+    case "accept_help":
+      if (!pet.permissions.canAskHelp) errors.push(`${pet.name} cannot accept help.`);
+      validateTaskExists(snapshot, action.taskId, errors);
+      validateOtherPet(snapshot, pet.id, action.targetPetId, errors);
+      break;
+    case "handoff_task":
+      if (!pet.permissions.canWork) errors.push(`${pet.name} cannot hand off work.`);
+      validateTaskExists(snapshot, action.taskId, errors);
+      validateOtherPet(snapshot, pet.id, action.targetPetId, errors);
+      break;
   }
 
   if (errors.length > 0) {
@@ -451,172 +612,330 @@ export function applyPetAction(
 ): ApplyActionResult {
   const validation = validatePetAction(snapshot, petId, proposedAction);
   if (!validation.ok) {
+    let next = appendEvent(snapshot, validation.event);
+    const created: WorldEvent[] = [validation.event];
+    const karma = applyKarmaForEvents(next, created, timestamp);
+    next = karma.snapshot;
+    created.push(...karma.events);
     return {
       ok: false,
-      snapshot: appendEvent(snapshot, validation.event),
+      snapshot: next,
       errors: validation.errors,
-      event: validation.event
+      event: validation.event,
+      events: created
     };
   }
 
   const action = validation.action;
   const actor = requirePet(snapshot, petId);
-  let nextPets = snapshot.pets;
-  let nextObjects = snapshot.objects;
-  let event: WorldEvent;
+  let next = snapshot;
+  const created: WorldEvent[] = [];
+
+  const emit = (event: WorldEvent): void => {
+    next = appendEvent(next, event);
+    created.push(event);
+  };
 
   switch (action.action) {
     case "say":
-      nextPets = updatePet(nextPets, petId, { status: "socializing" });
-      event = createEvent({
-        snapshot,
-        type: "PetSaid",
-        timestamp,
-        actorPetId: petId,
-        targetPetId: action.targetPetId ?? null,
-        payload: { message: action.message, reasonVisible: action.reasonVisible },
-        visibility: "room",
-        significance: action.targetPetId ? "medium" : "low"
-      });
+      next = { ...next, pets: updatePet(next.pets, petId, { status: "socializing" }) };
+      emit(
+        createWorldEvent({
+          snapshot: next,
+          type: "PetSaid",
+          timestamp,
+          actorPetId: petId,
+          targetPetId: action.targetPetId ?? null,
+          payload: { message: action.message, reasonVisible: action.reasonVisible },
+          visibility: "room",
+          significance: action.targetPetId ? "medium" : "low"
+        })
+      );
       break;
     case "move":
-      nextPets = updatePet(nextPets, petId, { status: "moving", position: { x: action.x, y: action.y } });
-      event = createEvent({
-        snapshot,
-        type: "PetMoved",
-        timestamp,
-        actorPetId: petId,
-        payload: { from: actor.position, to: { x: action.x, y: action.y }, reasonVisible: action.reasonVisible },
-        visibility: "room",
-        significance: "low"
-      });
+      next = { ...next, pets: updatePet(next.pets, petId, { status: "moving", position: { x: action.x, y: action.y } }) };
+      emit(
+        createWorldEvent({
+          snapshot: next,
+          type: "PetMoved",
+          timestamp,
+          actorPetId: petId,
+          payload: { from: actor.position, to: { x: action.x, y: action.y }, reasonVisible: action.reasonVisible },
+          visibility: "room",
+          significance: "low"
+        })
+      );
       break;
     case "work":
-      nextPets = updatePet(nextPets, petId, { status: "working", currentTaskId: action.taskId });
-      event = createEvent({
-        snapshot,
-        type: "PetStartedWork",
-        timestamp,
-        actorPetId: petId,
-        targetId: action.taskId,
-        payload: { taskId: action.taskId, reasonVisible: action.reasonVisible },
-        visibility: "room",
-        significance: "high"
-      });
+      next = {
+        ...next,
+        pets: updatePet(next.pets, petId, { status: "working", currentTaskId: action.taskId }),
+        tasks: next.tasks.some((task) => task.id === action.taskId)
+          ? updateTask(next.tasks, action.taskId, { status: "in_progress", assignedPetId: petId }, timestamp)
+          : next.tasks
+      };
+      emit(
+        createWorldEvent({
+          snapshot: next,
+          type: "PetStartedWork",
+          timestamp,
+          actorPetId: petId,
+          targetId: action.taskId,
+          payload: { taskId: action.taskId, reasonVisible: action.reasonVisible },
+          visibility: "room",
+          significance: "high"
+        })
+      );
       break;
     case "ask_help":
-      nextPets = updatePet(nextPets, petId, { status: "helping", currentTaskId: action.taskId });
-      event = createEvent({
-        snapshot,
-        type: "PetAskedHelp",
-        timestamp,
-        actorPetId: petId,
-        targetPetId: action.targetPetId,
-        targetId: action.taskId,
-        payload: { taskId: action.taskId, message: action.message ?? null, reasonVisible: action.reasonVisible },
-        visibility: "room",
-        significance: "medium"
-      });
+      next = { ...next, pets: updatePet(next.pets, petId, { status: "helping", currentTaskId: action.taskId }) };
+      emit(
+        createWorldEvent({
+          snapshot: next,
+          type: "PetAskedHelp",
+          timestamp,
+          actorPetId: petId,
+          targetPetId: action.targetPetId,
+          targetId: action.taskId,
+          payload: { taskId: action.taskId, message: action.message ?? null, reasonVisible: action.reasonVisible },
+          visibility: "room",
+          significance: "medium"
+        })
+      );
+      next = bumpRelationship(next, petId, action.targetPetId, { affinity: 1, note: "asked for help" }, timestamp);
       break;
     case "offer_help":
-      nextPets = updatePet(nextPets, petId, { status: "helping", currentTaskId: action.taskId });
-      event = createEvent({
-        snapshot,
-        type: "PetOfferedHelp",
-        timestamp,
-        actorPetId: petId,
-        targetPetId: action.targetPetId,
-        targetId: action.taskId,
-        payload: { taskId: action.taskId, message: action.message ?? null, reasonVisible: action.reasonVisible },
-        visibility: "room",
-        significance: "medium"
-      });
+      next = { ...next, pets: updatePet(next.pets, petId, { status: "helping", currentTaskId: action.taskId }) };
+      emit(
+        createWorldEvent({
+          snapshot: next,
+          type: "PetOfferedHelp",
+          timestamp,
+          actorPetId: petId,
+          targetPetId: action.targetPetId,
+          targetId: action.taskId,
+          payload: { taskId: action.taskId, message: action.message ?? null, reasonVisible: action.reasonVisible },
+          visibility: "room",
+          significance: "medium"
+        })
+      );
+      next = bumpRelationship(next, petId, action.targetPetId, { affinity: 1, note: "offered help" }, timestamp);
       break;
     case "build": {
       const object: WorldObject = {
-        id: `obj-${action.objectType.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${snapshot.events.length + 1}`,
-        roomId: snapshot.room.id,
+        id: `obj-${action.objectType.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${next.events.length + 1}`,
+        roomId: next.room.id,
         type: action.objectType,
         position: action.location,
         state: { builtBy: petId },
         ownerPetId: petId,
         description: `${actor.name} built a ${action.objectType}.`
       };
-      nextObjects = [...snapshot.objects, object];
-      nextPets = updatePet(nextPets, petId, { status: "decorating" });
-      event = createEvent({
-        snapshot,
-        type: "PetBuiltObject",
-        timestamp,
-        actorPetId: petId,
-        targetId: object.id,
-        payload: { object, reasonVisible: action.reasonVisible },
-        visibility: "room",
-        significance: "medium"
-      });
+      next = { ...next, objects: [...next.objects, object], pets: updatePet(next.pets, petId, { status: "decorating" }) };
+      emit(
+        createWorldEvent({
+          snapshot: next,
+          type: "PetBuiltObject",
+          timestamp,
+          actorPetId: petId,
+          targetId: object.id,
+          payload: { object, reasonVisible: action.reasonVisible },
+          visibility: "room",
+          significance: "medium"
+        })
+      );
       break;
     }
     case "decorate":
-      nextObjects = snapshot.objects.map((object) =>
-        object.id === action.objectId
-          ? { ...object, state: { ...object.state, style: action.style, decoratedBy: petId } }
-          : object
+      next = {
+        ...next,
+        objects: next.objects.map((object) =>
+          object.id === action.objectId
+            ? { ...object, state: { ...object.state, style: action.style, decoratedBy: petId } }
+            : object
+        ),
+        pets: updatePet(next.pets, petId, { status: "decorating" })
+      };
+      emit(
+        createWorldEvent({
+          snapshot: next,
+          type: "PetDecoratedObject",
+          timestamp,
+          actorPetId: petId,
+          targetId: action.objectId,
+          payload: { style: action.style, reasonVisible: action.reasonVisible },
+          visibility: "room",
+          significance: "medium"
+        })
       );
-      nextPets = updatePet(nextPets, petId, { status: "decorating" });
-      event = createEvent({
-        snapshot,
-        type: "PetDecoratedObject",
-        timestamp,
-        actorPetId: petId,
-        targetId: action.objectId,
-        payload: { style: action.style, reasonVisible: action.reasonVisible },
-        visibility: "room",
-        significance: "medium"
-      });
       break;
-    case "request_skill":
-      nextPets = updatePet(nextPets, petId, { status: "learning" });
-      event = createEvent({
-        snapshot,
-        type: "PetRequestedSkill",
-        timestamp,
-        actorPetId: petId,
-        payload: { name: action.name, purpose: action.purpose, reasonVisible: action.reasonVisible },
-        visibility: "room",
-        significance: "high"
-      });
+    case "request_skill": {
+      next = { ...next, pets: updatePet(next.pets, petId, { status: "learning" }) };
+      emit(
+        createWorldEvent({
+          snapshot: next,
+          type: "PetRequestedSkill",
+          timestamp,
+          actorPetId: petId,
+          payload: { name: action.name, purpose: action.purpose, reasonVisible: action.reasonVisible },
+          visibility: "room",
+          significance: "high"
+        })
+      );
+      const requested = created[created.length - 1];
+      const learned = learnSkill(
+        next,
+        petId,
+        { name: action.name, purpose: action.purpose, source: "requested", triggeringEventId: requested?.id ?? null },
+        timestamp
+      );
+      next = learned.snapshot;
+      created.push(...learned.events);
       break;
+    }
     case "reflect":
-      nextPets = snapshot.pets.map((candidate) =>
-        candidate.id === petId
-          ? {
-              ...candidate,
-              status: "observing",
-              memory: { ...candidate.memory, notes: [...candidate.memory.notes.slice(-7), action.memoryNote] }
-            }
-          : candidate
+      next = {
+        ...next,
+        pets: next.pets.map((candidate) =>
+          candidate.id === petId
+            ? {
+                ...candidate,
+                status: "observing",
+                memory: { ...candidate.memory, notes: [...candidate.memory.notes.slice(-7), action.memoryNote] }
+              }
+            : candidate
+        )
+      };
+      emit(
+        createWorldEvent({
+          snapshot: next,
+          type: "PetReflected",
+          timestamp,
+          actorPetId: petId,
+          payload: { memoryNote: action.memoryNote, reasonVisible: action.reasonVisible },
+          visibility: "system",
+          significance: "low"
+        })
       );
-      event = createEvent({
-        snapshot,
-        type: "PetReflected",
-        timestamp,
-        actorPetId: petId,
-        payload: { memoryNote: action.memoryNote, reasonVisible: action.reasonVisible },
-        visibility: "system",
-        significance: "low"
-      });
+      break;
+    case "claim_task":
+      next = {
+        ...next,
+        pets: updatePet(next.pets, petId, { status: "reacting", currentTaskId: action.taskId }),
+        tasks: updateTask(next.tasks, action.taskId, { status: "claimed", assignedPetId: petId }, timestamp)
+      };
+      emit(
+        createWorldEvent({
+          snapshot: next,
+          type: "TaskClaimed",
+          timestamp,
+          actorPetId: petId,
+          targetId: action.taskId,
+          payload: { taskId: action.taskId, reasonVisible: action.reasonVisible, summary: `${actor.name} claimed the task.` },
+          visibility: "room",
+          significance: "medium"
+        })
+      );
+      break;
+    case "decline_task":
+      emit(
+        createWorldEvent({
+          snapshot: next,
+          type: "TaskDeclined",
+          timestamp,
+          actorPetId: petId,
+          targetId: action.taskId,
+          payload: { taskId: action.taskId, message: action.message ?? null, reasonVisible: action.reasonVisible },
+          visibility: "room",
+          significance: "low"
+        })
+      );
+      break;
+    case "propose_plan":
+      next = { ...next, tasks: updateTask(next.tasks, action.taskId, { status: "planned", planSummary: action.summary }, timestamp) };
+      emit(
+        createWorldEvent({
+          snapshot: next,
+          type: "TaskPlanProposed",
+          timestamp,
+          actorPetId: petId,
+          targetId: action.taskId,
+          payload: { taskId: action.taskId, summary: action.summary, reasonVisible: action.reasonVisible },
+          visibility: "room",
+          significance: "medium"
+        })
+      );
+      break;
+    case "request_review":
+      next = { ...next, tasks: updateTask(next.tasks, action.taskId, { status: "in_review", reviewerPetId: action.targetPetId }, timestamp) };
+      emit(
+        createWorldEvent({
+          snapshot: next,
+          type: "TaskReviewRequested",
+          timestamp,
+          actorPetId: petId,
+          targetPetId: action.targetPetId,
+          targetId: action.taskId,
+          payload: { taskId: action.taskId, message: action.message ?? null, reasonVisible: action.reasonVisible },
+          visibility: "room",
+          significance: "medium"
+        })
+      );
+      next = bumpRelationship(next, petId, action.targetPetId, { affinity: 1, trust: 1, note: "requested review" }, timestamp);
+      break;
+    case "accept_help":
+      emit(
+        createWorldEvent({
+          snapshot: next,
+          type: "TaskHelpAccepted",
+          timestamp,
+          actorPetId: petId,
+          targetPetId: action.targetPetId,
+          targetId: action.taskId,
+          payload: { taskId: action.taskId, reasonVisible: action.reasonVisible },
+          visibility: "room",
+          significance: "medium"
+        })
+      );
+      next = bumpRelationship(next, petId, action.targetPetId, { affinity: 2, trust: 1, note: "accepted help" }, timestamp);
+      break;
+    case "handoff_task":
+      next = {
+        ...next,
+        pets: updatePet(
+          updatePet(next.pets, petId, { status: "idle", currentTaskId: null }),
+          action.targetPetId,
+          { currentTaskId: action.taskId }
+        ),
+        tasks: updateTask(next.tasks, action.taskId, { status: "claimed", assignedPetId: action.targetPetId }, timestamp)
+      };
+      emit(
+        createWorldEvent({
+          snapshot: next,
+          type: "TaskHandedOff",
+          timestamp,
+          actorPetId: petId,
+          targetPetId: action.targetPetId,
+          targetId: action.taskId,
+          payload: { taskId: action.taskId, reason: action.reason, reasonVisible: action.reasonVisible },
+          visibility: "room",
+          significance: "medium"
+        })
+      );
+      next = bumpRelationship(next, petId, action.targetPetId, { affinity: 1, note: "handed off task" }, timestamp);
       break;
   }
 
+  const primary = created[0] as WorldEvent;
+  const karma = applyKarmaForEvents(next, created, timestamp);
+  next = karma.snapshot;
+  created.push(...karma.events);
+
   return {
     ok: true,
-    snapshot: RoomSnapshotSchema.parse({
-      room: snapshot.room,
-      pets: nextPets,
-      objects: nextObjects,
-      events: [...snapshot.events, event]
-    }),
-    event
+    snapshot: RoomSnapshotSchema.parse(next),
+    event: primary,
+    events: created
   };
 }
 
@@ -625,25 +944,21 @@ export function runDeterministicTick(snapshot: RoomSnapshot, timestamp: string =
     return snapshot;
   }
 
-  let next: RoomSnapshot = {
-    ...snapshot,
-    room: { ...snapshot.room, tick: snapshot.room.tick + 1 },
-    events: [
-      ...snapshot.events,
-      createEvent({
-        snapshot,
-        type: "SimulationTick",
-        timestamp,
-        actorPetId: null,
-        payload: { tick: snapshot.room.tick + 1 },
-        visibility: "system",
-        significance: "low"
-      })
-    ]
-  };
+  let next: RoomSnapshot = appendEvent(
+    { ...snapshot, room: { ...snapshot.room, tick: snapshot.room.tick + 1 } },
+    createWorldEvent({
+      snapshot: { room: { ...snapshot.room, tick: snapshot.room.tick + 1 }, events: snapshot.events },
+      type: "SimulationTick",
+      timestamp,
+      actorPetId: null,
+      payload: { tick: snapshot.room.tick + 1 },
+      visibility: "system",
+      significance: "low"
+    })
+  );
 
   const tickEvent = latestEvent(next);
-  for (const pet of next.pets) {
+  for (const pet of next.pets.filter((candidate) => !candidate.archived)) {
     const observation = buildObservation(next, pet.id, tickEvent);
     const action = chooseDeterministicPetAction(observation);
     if (action) {
@@ -659,8 +974,8 @@ export function pauseSimulation(snapshot: RoomSnapshot, timestamp: string = new 
   const paused = { ...snapshot, room: { ...snapshot.room, paused: true } };
   return appendEvent(
     paused,
-    createEvent({
-      snapshot,
+    createWorldEvent({
+      snapshot: paused,
       type: "SimulationPaused",
       timestamp,
       actorPetId: null,
@@ -675,8 +990,8 @@ export function resumeSimulation(snapshot: RoomSnapshot, timestamp: string = new
   const resumed = { ...snapshot, room: { ...snapshot.room, paused: false } };
   return appendEvent(
     resumed,
-    createEvent({
-      snapshot,
+    createWorldEvent({
+      snapshot: resumed,
       type: "SimulationResumed",
       timestamp,
       actorPetId: null,
@@ -687,30 +1002,7 @@ export function resumeSimulation(snapshot: RoomSnapshot, timestamp: string = new
   );
 }
 
-function createEvent(input: {
-  snapshot: Pick<RoomSnapshot, "room" | "events">;
-  type: WorldEvent["type"];
-  timestamp: string;
-  actorPetId: string | null;
-  targetPetId?: string | null;
-  targetId?: string | null;
-  payload: Record<string, unknown>;
-  visibility: WorldEvent["visibility"];
-  significance: WorldEvent["significance"];
-}): WorldEvent {
-  return {
-    id: `evt-${input.snapshot.room.tick}-${input.snapshot.events.length + 1}-${input.type}`,
-    roomId: input.snapshot.room.id,
-    type: input.type,
-    timestamp: input.timestamp,
-    actorPetId: input.actorPetId,
-    targetPetId: input.targetPetId ?? null,
-    targetId: input.targetId ?? null,
-    payload: input.payload,
-    visibility: input.visibility,
-    significance: input.significance
-  };
-}
+// --- internal helpers -----------------------------------------------------
 
 function createPerceptionEvent(
   snapshot: RoomSnapshot,
@@ -719,7 +1011,7 @@ function createPerceptionEvent(
   responseLevel: ResponseLevel,
   timestamp: string
 ): WorldEvent {
-  return createEvent({
+  return createWorldEvent({
     snapshot,
     type: "PetObserved",
     timestamp,
@@ -752,13 +1044,6 @@ function annotateTriggeredResponse(
   };
 }
 
-function replaceEvent(snapshot: RoomSnapshot, event: WorldEvent): RoomSnapshot {
-  return RoomSnapshotSchema.parse({
-    ...snapshot,
-    events: snapshot.events.map((existing) => (existing.id === event.id ? event : existing))
-  });
-}
-
 function canProposeAction(responseLevel: ResponseLevel): boolean {
   return (
     responseLevel === "ambient_reaction" ||
@@ -772,7 +1057,7 @@ function eventLabel(event: WorldEvent): string {
 }
 
 function availableActionsForPet(pet: Pet): AvailableAction[] {
-  return [
+  const actions: Array<AvailableAction | null> = [
     pet.permissions.canSpeak ? "say" : null,
     pet.permissions.canMove ? "move" : null,
     pet.permissions.canWork ? "work" : null,
@@ -781,32 +1066,15 @@ function availableActionsForPet(pet: Pet): AvailableAction[] {
     pet.permissions.canBuild ? "build" : null,
     pet.permissions.canDecorate ? "decorate" : null,
     pet.permissions.canRequestSkill ? "request_skill" : null,
-    pet.permissions.canReflect ? "reflect" : null
-  ].filter((action): action is AvailableAction => action !== null);
-}
-
-function appendEvent(snapshot: RoomSnapshot, event: WorldEvent): RoomSnapshot {
-  return RoomSnapshotSchema.parse({ ...snapshot, events: [...snapshot.events, event] });
-}
-
-function latestEvent(snapshot: RoomSnapshot): WorldEvent | null {
-  return snapshot.events.at(-1) ?? null;
-}
-
-function requirePet(snapshot: RoomSnapshot, petId: string): Pet {
-  const pet = snapshot.pets.find((candidate) => candidate.id === petId);
-  if (!pet) {
-    throw new Error(`Pet not found: ${petId}`);
-  }
-  return pet;
-}
-
-function updatePet(pets: Pet[], petId: string, patch: Partial<Pet>): Pet[] {
-  return pets.map((pet) => (pet.id === petId ? { ...pet, ...patch } : pet));
-}
-
-function isInsideRoom(snapshot: RoomSnapshot, position: Position): boolean {
-  return position.x < snapshot.room.width && position.y < snapshot.room.height;
+    pet.permissions.canReflect ? "reflect" : null,
+    pet.permissions.canWork ? "claim_task" : null,
+    pet.permissions.canWork ? "decline_task" : null,
+    pet.permissions.canWork ? "propose_plan" : null,
+    pet.permissions.canWork ? "request_review" : null,
+    pet.permissions.canAskHelp ? "accept_help" : null,
+    pet.permissions.canWork ? "handoff_task" : null
+  ];
+  return actions.filter((action): action is AvailableAction => action !== null);
 }
 
 function validateOtherPet(snapshot: RoomSnapshot, actorPetId: string, targetPetId: string, errors: string[]): void {
@@ -819,11 +1087,31 @@ function validateOtherPet(snapshot: RoomSnapshot, actorPetId: string, targetPetI
   }
 }
 
+function validateTaskExists(snapshot: RoomSnapshot, taskId: string, errors: string[]): void {
+  if (!snapshot.tasks.some((task) => task.id === taskId)) {
+    errors.push("Task does not exist.");
+  }
+}
+
+function validateClaimable(snapshot: RoomSnapshot, actorPetId: string, taskId: string, errors: string[]): void {
+  const task = getTask(snapshot, taskId);
+  if (!task) {
+    errors.push("Task does not exist.");
+    return;
+  }
+  if (task.assignedPetId && task.assignedPetId !== actorPetId) {
+    errors.push("Task is already claimed by another pet.");
+  }
+  if (["completed", "cancelled"].includes(task.status)) {
+    errors.push("Task is already closed.");
+  }
+}
+
 function rejected(snapshot: RoomSnapshot, petId: string, errors: string[]): ValidationResult {
   return {
     ok: false,
     errors,
-    event: createEvent({
+    event: createWorldEvent({
       snapshot,
       type: "ActionRejected",
       timestamp: new Date().toISOString(),
@@ -835,22 +1123,45 @@ function rejected(snapshot: RoomSnapshot, petId: string, errors: string[]): Vali
   };
 }
 
-function distance(a: Position, b: Position): number {
-  return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+function wantsToClaim(pet: Pet): boolean {
+  return (
+    pet.traits.workStyle === "builder" ||
+    pet.traits.workStyle === "debugger" ||
+    pet.traits.workStyle === "refactorer" ||
+    pet.traits.workStyle === "researcher" ||
+    pet.traits.temperament === "bold" ||
+    pet.traits.socialStyle === "competitive"
+  );
 }
 
-function isNearby(snapshot: RoomSnapshot, petId: string, otherPetId: string, radius: number): boolean {
-  const pet = requirePet(snapshot, petId);
-  const other = requirePet(snapshot, otherPetId);
-  return distance(pet.position, other.position) <= radius;
-}
-
-function stableNumber(input: string): number {
-  let hash = 0;
-  for (let index = 0; index < input.length; index += 1) {
-    hash = (hash * 31 + input.charCodeAt(index)) >>> 0;
+function nearestDesk(desks: WorldObject[], position: Position): WorldObject | undefined {
+  let best: WorldObject | undefined;
+  let bestDistance = Infinity;
+  for (const desk of desks) {
+    const d = distance(desk.position, position);
+    if (d < bestDistance) {
+      best = desk;
+      bestDistance = d;
+    }
   }
-  return hash;
+  return best;
+}
+
+function atDesk(position: Position, deskPosition: Position): boolean {
+  return distance(position, deskPosition) <= 1;
+}
+
+function stepToward(from: Position, to: Position, room: { width: number; height: number }): Position {
+  let { x, y } = from;
+  if (x !== to.x) {
+    x += Math.sign(to.x - x);
+  } else if (y !== to.y) {
+    y += Math.sign(to.y - y);
+  }
+  return {
+    x: Math.max(0, Math.min(room.width - 1, x)),
+    y: Math.max(0, Math.min(room.height - 1, y))
+  };
 }
 
 function nextStep(position: Position, width: number, height: number, seed: number): Position {

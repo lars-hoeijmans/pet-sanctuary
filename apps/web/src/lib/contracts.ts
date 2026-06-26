@@ -5,6 +5,7 @@ import type {
   ResponseLevel,
   RoomSnapshot as ContractRoomSnapshot,
   WorldEvent as ContractWorldEvent,
+  WorldEventType,
   WorldObject as ContractWorldObject
 } from "@pet-sanctuary/contracts";
 
@@ -51,24 +52,8 @@ export type RoomObject = {
 
 export type WorldEvent = {
   id: string;
-  type:
-    | "RoomSeeded"
-    | "RoomNotice"
-    | "SimulationTick"
-    | "SimulationPaused"
-    | "SimulationResumed"
-    | "PetObserved"
-    | "PetMoved"
-    | "PetSaid"
-    | "PetAskedHelp"
-    | "PetOfferedHelp"
-    | "PetStartedWork"
-    | "PetBuiltObject"
-    | "PetDecoratedObject"
-    | "PetRequestedSkill"
-    | "PetReflected"
-    | "ActionRejected"
-    | "SystemNotice";
+  // The contract enum is the source of truth for every event the backend emits.
+  type: WorldEventType | "SystemNotice";
   summary: string;
   createdAt: string;
   actorPetId?: string;

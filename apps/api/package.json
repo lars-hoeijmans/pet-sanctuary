@@ -13,6 +13,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@pet-sanctuary/agent-runtime": "workspace:*",
     "@pet-sanctuary/contracts": "workspace:*",
     "@pet-sanctuary/db": "workspace:*",
     "@pet-sanctuary/domain": "workspace:*",
