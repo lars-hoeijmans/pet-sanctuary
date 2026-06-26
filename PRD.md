@@ -21,7 +21,7 @@ Recommended implementation decisions:
 1. **Use Hermes Agent as the primary hackathon runtime for self-learning pets.** Hermes has built-in learning loops, agent-managed skills, persistent memory, profiles, multi-agent collaboration primitives, Docker/remote backends, gateway/dashboard modes, and approval gates. This makes it the safer and faster fit for a hosted hackathon demo.
 2. **Use Pi Coding Agent/Harness as a stretch path for the “wild self-mutating pet” mechanic.** Pi is stronger if the desired demo is “the pet edits its own harness/extensions/tools and reloads itself.” That is a great spectacle, but it is riskier for a short hackathon because Pi’s extension code runs with process permissions and reloads can reset runtime state.
 3. **Do not run every idle pet as its own full container.** Represent pets as logical agents with separate identity, memory, skill/profile directories, and state. Run a small shared worker pool. Use per-pet sandbox containers only when a pet executes code, modifies tools, or performs unsafe work.
-4. **Host the MVP on Oracle Cloud Always Free, but design for the current 2 OCPU / 12 GB Arm A1 free-tenancy constraint.** Keep agent count small, use external LLM APIs, avoid local models, and run low-frequency simulation ticks.
+4. **Build and validate locally first; deploy to Oracle Cloud later.** The first implementation target is a local Docker Compose/dev setup. Oracle Cloud Always Free remains the likely demo hosting target, but deployment should wait until the local Living Room Kernel and core collaboration loop are working.
 5. **Use structured world descriptions, not screenshots, as the default agent perception model.** The UI can be visual and Habbo-like, but agents should reason over compact JSON/text world state. Screenshots and vision models are a stretch feature.
 6. **Make destructive behavior reversible and virtual-only in v1.** “Destroy,” “steal,” or “sabotage” can exist as toy-world actions that affect room objects and karma, not host files, real repositories, credentials, or infrastructure.
 7. **Ship audio as stretch only.** Text bubbles and event logs are enough for the demo. Voices/music can be added if the main slice is stable.
@@ -29,6 +29,7 @@ Recommended implementation decisions:
 9. **Use world-mediated collaboration, not private model-to-model chat.** Pets should communicate by creating visible world events such as speech, help offers, task claims, plans, reviews, and handoffs. Other pets notice those events through structured observations and may react later.
 10. **Use a TypeScript monorepo with Next.js and NestJS.** The product should be built as a pnpm/Turborepo monorepo with a Next.js frontend, NestJS backend, shared TypeScript domain/contracts packages, Postgres + Drizzle, Zod validation, and a staged agent-runtime adapter.
 11. **Treat the Vercel AI SDK as optional model-call plumbing only.** The AI SDK must not run the world server, simulation, collaboration protocol, permissions, or task orchestration. It can later be used inside an `AiSdkRuntime` adapter to ask a model for one structured proposed pet action.
+12. **Do not depend on paid per-token LLM APIs by default.** Agent-backed behavior should first try no-incremental-cost routes such as a free OpenCode/DeepSeek V4 Flash option if available, or an existing Codex subscription path through Hermes or a compatible harness if technically and contractually supported. If those routes are not viable, pause and ask for a human-in-the-loop decision before using a paid API.
 
 ---
 
@@ -228,15 +229,17 @@ This keeps token use predictable and works with non-vision models. Screenshots c
 
 ## 10. Pet behavior requirements
 
-Pets should run on a low-frequency simulation loop. They do not need to call an LLM every second. Most ticks can be cheap deterministic simulation; LLM calls should happen when a pet needs to speak, plan, work, or react to an important event.
+Pets should run on a low-frequency simulation loop. They do not need to call an LLM every second. Most ticks can be cheap deterministic simulation; LLM calls should happen when a pet needs to speak, plan, work, or take a high-value reaction to an important event.
 
-Models do not literally live inside the world server or continuously watch the database. The product should create that feeling through a server-owned attention system: world events are written to the event log, the orchestrator decides which pets are eligible to notice them, and selected pets are woken up to produce one proposed action.
+Models do not literally live inside the world server or continuously watch the database. The product should create that feeling through a server-owned perception and response system: world events are written to the event log, significant events are perceived by every active pet in scope, and the orchestrator classifies each pet's response level. Not every pet needs to take a world-changing action to feel alive.
 
 ### Pet states
 
 MVP states:
 
 - Idle.
+- Observing.
+- Reacting.
 - Socializing.
 - Moving.
 - Working.
@@ -268,6 +271,20 @@ Collaboration actions that can be added during the task/collaboration slice:
 - `accept_help(target_pet, task_id)`
 - `handoff_task(target_pet, task_id, reason)`
 
+### Perception and response levels
+
+When a meaningful world event happens, the orchestrator should run a perception pass before deciding who acts. For significant room-level events, every active pet should perceive the event. For local or noisy events, nearby or relevant pets can receive detailed observations while the rest receive a summary later.
+
+Each pet then gets a response level:
+
+- `observe_only`: the pet perceives the event but produces no visible output.
+- `internal_reaction`: mood, attention, memory, or relationship state may change without a visible event.
+- `ambient_reaction`: the pet emits a lightweight visible reaction such as a short aside, emote, glance, or movement.
+- `social_response`: the pet can say something, offer help, ask for help, propose a plan, or request review.
+- `task_action`: the pet can claim work, hand off work, move to a desk, start work, or request a skill.
+
+This makes the room feel alive without requiring every pet to perform an expensive model call or world-changing action for every event.
+
 ### Collaboration model
 
 Pets collaborate through the shared world state and append-only event log. A pet should not open an invisible private conversation with another pet, and one model output should never directly become another pet's system instruction. Inter-pet messages are untrusted world content.
@@ -276,19 +293,19 @@ Example flow:
 
 1. The user creates a task.
 2. The world server records `TaskCreated`.
-3. The orchestrator scores which pets should notice the task based on role, proximity, current state, relationships, and availability.
-4. Selected pets receive compact observations that include the task and recent events.
-5. Pets propose actions such as `claim_task`, `offer_help`, `propose_plan`, or `request_review`.
+3. Every active pet in the room perceives the task event, with detail based on role, proximity, current state, relationships, and availability.
+4. The orchestrator classifies each pet's response level.
+5. Some pets may only store an internal reaction, some may produce ambient flavor, and some may be allowed to propose actions such as `claim_task`, `offer_help`, `propose_plan`, or `request_review`.
 6. The server validates each proposal, applies accepted changes, records new events, and broadcasts them to the UI.
-7. Other pets observe those events on later ticks and may react.
+7. Other pets observe those new events on later ticks and may react at their own response level.
 
 This creates team-like behavior while keeping the server authoritative and the interaction inspectable, replayable, and safe.
 
 ### Behavior selection
 
-Each tick or meaningful world event, the orchestrator should decide which pets, if any, should be woken up. A pet can be handled by deterministic policy, an optional structured model-call adapter, or a real agent runtime depending on its configuration and the current slice.
+Each tick or meaningful world event, the orchestrator should run perception and response classification. A pet can be handled by deterministic policy, an optional structured model-call adapter, or a real agent runtime depending on its configuration and the current slice.
 
-When a pet is woken, the orchestrator sends it:
+When a pet is asked to produce a visible or task-level response, the orchestrator sends it:
 
 - Its personality and current goals.
 - Compact world observation.
@@ -299,12 +316,13 @@ When a pet is woken, the orchestrator sends it:
 
 The agent returns a constrained JSON action. The orchestrator validates the action before applying it.
 
-For the Living Room Kernel and initial collaboration slice, use deterministic policies only. Add model-backed behavior later behind the same runtime interface.
+For `observe_only`, `internal_reaction`, and many `ambient_reaction` cases, no model call is required. For the Living Room Kernel and initial collaboration slice, use deterministic policies only. Add model-backed behavior later behind the same runtime interface.
 
 ### Acceptance criteria
 
 - Personality changes action selection and speaking style.
 - Pets can initiate at least one social interaction without direct user prompting.
+- Significant room-level events can produce different response levels across all active pets.
 - Pets can move to a desk before working.
 - Pet actions are logged and visible.
 
@@ -421,13 +439,25 @@ Do not allow destructive personality to delete files, kill containers, exfiltrat
 
 ---
 
-## 14. Hosting recommendation: Oracle Cloud Always Free
+## 14. Local-first development and later hosting
 
-### Current constraint
+### Local-first decision
 
-The MVP can run on Oracle Cloud Always Free, but the design should assume the current Always Free Arm A1 limit for Always Free tenancies is **2 OCPUs and 12 GB RAM**, not the older 4 OCPU / 24 GB commonly mentioned in older posts.
+Build and validate the MVP locally first. The first milestone should run in a local dev environment or local Docker Compose stack with `web`, `api`, `db`, and later `worker`/`redis` as needed. Do not make Oracle deployment a Phase 0 blocker.
 
-### Recommended shape
+Local-first goals:
+
+- Short feedback loop for the Living Room Kernel.
+- Easy collaboration between backend and frontend work.
+- Stable demo seed and reset flow before exposing the app publicly.
+- No cloud/network debugging until the product loop is proven.
+- Ability to run deterministic behavior even before any model route is verified.
+
+### Later Oracle Cloud target
+
+The MVP can later run on Oracle Cloud Always Free, but the design should assume the current Always Free Arm A1 limit for Always Free tenancies is **2 OCPUs and 12 GB RAM**, not the older 4 OCPU / 24 GB commonly mentioned in older posts.
+
+Recommended later hosting shape:
 
 Use one Arm A1 Flex VM:
 
@@ -436,7 +466,21 @@ Use one Arm A1 Flex VM:
 - 100–150 GB boot/block volume.
 - Ubuntu or Oracle Linux.
 - Docker Engine + Docker Compose.
-- External LLM APIs; no local model inference.
+- No local model inference.
+- No paid per-token LLM API dependency for the MVP.
+
+### LLM cost policy
+
+The MVP should avoid incremental LLM API costs by default. Model-backed behavior should first use routes that do not introduce pay-per-token spend for the team.
+
+Candidate routes to verify before implementation:
+
+- **OpenCode / free DeepSeek V4 Flash route:** use if a free, rate-limited, and legally acceptable path is available for structured pet-action proposals or lightweight dialogue.
+- **Codex subscription route:** use an existing Codex subscription, for example through Hermes or another compatible harness, if it can be integrated without violating product terms, leaking credentials, or depending on unsupported automation.
+
+Do not silently fall back to paid provider API keys. If no no-cost route is verified in time, pause and ask for a human-in-the-loop decision. The team can then explicitly choose whether to use a paid API, keep the model-backed behavior out of the demo, or continue with deterministic behavior.
+
+The exact model/provider integration is intentionally a Phase 3/5 research task, not a Phase 0 blocker.
 
 ### Runtime budget
 
@@ -445,7 +489,7 @@ For a stable demo, target:
 - 3–5 pets total.
 - 1–2 concurrent agent work jobs.
 - Simulation ticks every 10–30 seconds.
-- LLM calls only on meaningful events.
+- LLM calls only on meaningful events, and only after a no-cost route is verified or the team explicitly approves paid API usage.
 - Worker concurrency capped.
 - Aggressive transcript/event summarization.
 
@@ -488,7 +532,7 @@ Use a TypeScript-first monorepo:
 - **ORM/migrations:** Drizzle.
 - **Realtime:** NestJS WebSocket Gateway, using Socket.IO first for fast reconnection and client ergonomics.
 - **Queue:** BullMQ + Redis/Valkey once the worker needs durable jobs; skip this for the Living Room Kernel if the API process can run the tiny simulation loop directly.
-- **Optional structured model-call adapter:** Vercel AI SDK Core may be used inside `AiSdkRuntime` for schema-constrained proposed actions when agent-backed behavior begins.
+- **Optional structured model-call adapter:** Vercel AI SDK Core may be used inside `AiSdkRuntime` for schema-constrained proposed actions only if it works with the chosen no-cost model route.
 - **Agent runtime:** product-owned adapter interface with deterministic, optional `AiSdkRuntime`, Hermes, and optional Pi implementations.
 
 Do not make Next.js route handlers the main backend for the sanctuary. Next.js should own the UI/app shell. The sanctuary itself needs a long-running backend process for simulation ticks, WebSocket connections, action validation, event logging, worker dispatch, and agent-runtime calls.
@@ -496,6 +540,8 @@ Do not make Next.js route handlers the main backend for the sanctuary. Next.js s
 Do not make Hermes, Pi, LangChain, or any other agent framework the product orchestrator. The product should own the world engine and pet orchestration. Agent frameworks should sit behind a small adapter boundary.
 
 Do not make the Vercel AI SDK the world server, collaboration engine, task scheduler, permission layer, or source of truth. If used, it is only a provider-agnostic way to ask a model for one structured proposed action, personality profile, task summary, memory note, or skill proposal. The server still validates and applies or rejects the result.
+
+Do not commit to a model provider that requires paid per-token API usage for the MVP. The `agent-runtime` package should keep provider integrations swappable so OpenCode/free DeepSeek, Codex-subscription-backed Hermes, or deterministic policies can share the same product contract.
 
 Recommended monorepo shape:
 
@@ -651,20 +697,21 @@ For a stretch “mad scientist pet that modifies its own tools”: **Pi**.
 
 1. User opens the sanctuary web app.
 2. API loads world state and pet state from DB.
-3. Simulation loop and meaningful world events feed the pet attention system.
-4. The orchestrator decides which pets are eligible to notice or react.
-5. Selected pets receive compact observations and propose one constrained action.
-6. API validates each proposed action, applies accepted world updates, and logs events.
-7. WebSocket gateway broadcasts accepted state changes and events.
-8. If the action requires real work, API enqueues a worker job.
-9. Worker invokes Hermes/Pi in the pet’s profile/workspace/sandbox.
-10. Worker streams progress events back to API.
-11. Learned skill or output is persisted and shown in UI.
+3. Simulation loop and meaningful world events feed the pet perception and response system.
+4. Significant events are perceived by every active pet in scope.
+5. The orchestrator classifies each pet's response level.
+6. Pets assigned visible or task-level responses may propose one constrained action.
+7. API validates each proposed action, applies accepted world updates, and logs events.
+8. WebSocket gateway broadcasts accepted state changes, ambient reactions, and events.
+9. If the action requires real work, API enqueues a worker job.
+10. Worker invokes Hermes/Pi in the pet’s profile/workspace/sandbox.
+11. Worker streams progress events back to API.
+12. Learned skill or output is persisted and shown in UI.
 
 ### Backend modules
 
 - `world_engine`: authoritative room state, pathing, objects, positions.
-- `pet_orchestrator`: pet scheduling, attention scoring, observation building, action validation.
+- `pet_orchestrator`: pet scheduling, perception pass, response classification, observation building, action validation.
 - `agent_runtime`: adapter boundary for deterministic policies, optional AI SDK structured proposals, Hermes, and optional Pi.
 - `skill_manager`: skill records, approvals, UI state.
 - `karma_engine`: karma events and consequences.
@@ -726,7 +773,7 @@ For example, a pet saying something to another pet should flow through the world
 
 If valid, the server records a `PetSaid` event, displays a speech bubble, and includes that event in the target pet's later observation. The target pet can then respond, ignore it, offer help, claim a task, or take another valid action.
 
-The world server asks, “which pets should be allowed to react?” Each pet answers, “what do I propose doing?” The world server decides whether that proposal becomes reality.
+The world server first asks, “what did each pet perceive, and what response level should it get?” Pets assigned visible or task-level responses then answer, “what do I propose doing?” The world server decides whether that proposal becomes reality.
 
 ### Agent output contract
 
@@ -827,8 +874,7 @@ Acceptance criteria:
 - Create `apps/api` as a NestJS app.
 - Create initial shared packages: `domain`, `contracts`, `db`, `agent-runtime`, and `config`.
 - Add Postgres and Drizzle migrations.
-- Create Docker Compose stack.
-- Deploy hello-world web app to Oracle VM.
+- Create local Docker Compose/dev stack.
 - Add database and websocket plumbing.
 - Build event log and room state persistence.
 
@@ -847,7 +893,7 @@ Acceptance criteria:
 - Add manager command input.
 - Create simple user-assigned tasks.
 - Add world-mediated collaboration events for task creation, task claims, help offers, plans, review requests, and handoffs.
-- Add an attention/wake-up scoring system so pets appear to notice relevant world events.
+- Add a perception and response classification system so all active pets can notice significant room events while only some take visible or task-level actions.
 - Let pets move to desks before working.
 - Let another pet ask for or offer help.
 - Add relationship notes or affinity as lightweight state.
@@ -856,6 +902,10 @@ Acceptance criteria:
 
 ### Phase 3 — Agent-backed behavior
 
+- Verify a no-cost model route before enabling model-backed behavior.
+- Prefer OpenCode/free DeepSeek V4 Flash if available and suitable for structured action proposals.
+- Prefer an existing Codex subscription path through Hermes or a compatible harness if supported.
+- If no no-cost route is viable, ask for a human-in-the-loop decision before adding paid API usage.
 - Add optional structured LLM action proposals for selected events through an `AiSdkRuntime`.
 - Keep deterministic policies as fallback.
 - Enforce strict JSON output schemas.
@@ -874,6 +924,7 @@ Acceptance criteria:
 ### Phase 5 — Agent runtime integration
 
 - Add Hermes adapter first.
+- Confirm whether Hermes can use the chosen no-cost model route or Codex subscription path.
 - Map pet identity to Hermes profile/config/skill directory.
 - Run one task from pet desk.
 - Stream progress to event feed.
@@ -893,6 +944,7 @@ Acceptance criteria:
 - Add a reliable demo task.
 - Add reset/demo seed button.
 - Add deployment backup/export.
+- Deploy to Oracle Cloud Always Free or another demo host once the local flow is stable.
 
 ---
 
@@ -927,7 +979,7 @@ Mitigation: treat pet dialogue as untrusted content; enforce permissions server-
 
 ### Risk: Oracle Always Free capacity/reclamation issues
 
-Mitigation: deploy early, keep backups, export demo seed data, and have a local fallback Compose run.
+Mitigation: build and verify locally first, deploy only after the core loop is stable, keep backups, and export demo seed data before hosting.
 
 ### Risk: visuals consume too much time
 
@@ -935,7 +987,7 @@ Mitigation: one room, simple sprites, high-quality text bubbles/event feed. The 
 
 ### Risk: agents spend too many tokens
 
-Mitigation: structured world observations, summaries, event compression, low tick frequency, and hard per-demo budget caps.
+Mitigation: structured world observations, summaries, event compression, low tick frequency, hard per-demo budget caps, and human approval before any paid API route is used.
 
 ---
 
@@ -992,6 +1044,6 @@ Cursor SDK context:
 
 ## 24. Final recommendation
 
-Build the hackathon MVP as **Hermes-backed Agent Pet Sanctuary hosted on Oracle Always Free**, with pets represented as logical agents sharing a small worker pool. Focus the demo on pet creation, visible personality, persistent room state, social interactions, karma, and one clear skill-learning moment.
+Build the hackathon MVP as a **local-first Hermes-backed Agent Pet Sanctuary**, with pets represented as logical agents sharing a small worker pool. Prove the Living Room Kernel, collaboration loop, persistence, and demo seed locally first; deploy to Oracle Always Free or another demo host only after the local flow is stable.
 
 Keep **Pi** as a stretch integration for a single “mad scientist” pet that can edit its own extension/tools and visibly reload. That mechanic is exciting, but it should not be the foundation of the core demo unless the team has already proven it stable in a sandbox.

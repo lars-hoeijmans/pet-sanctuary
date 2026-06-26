@@ -19,12 +19,15 @@ The hackathon MVP targets a demo where users spin up a pet, see distinct behavio
 
 ## Tech stack (planned)
 
-- **Frontend:** React/Vite or Next.js
-- **Backend:** API + WebSocket server, simulation loop, action validation
+- **Monorepo:** pnpm workspaces + Turborepo
+- **Frontend:** Next.js App Router
+- **Backend:** NestJS API + WebSocket server, simulation loop, action validation
 - **Agent runtime:** [Hermes Agent](https://hermes-agent.nousresearch.com/docs/) (primary); [Pi harness](https://pi.dev/) (stretch, self-modifying pet)
-- **Database:** Postgres or SQLite
+- **Database:** Postgres + Drizzle
 - **Queue (optional):** Redis/Valkey
-- **Deployment:** Docker Compose on Oracle Cloud Always Free (2 OCPU / 12 GB Arm)
+- **Local development:** Docker Compose/dev stack first
+- **Deployment:** Oracle Cloud Always Free later, after the local flow is stable
+- **LLM cost policy:** no paid per-token API dependency by default; verify OpenCode/free DeepSeek or Codex-subscription-backed routes first, and ask for human approval before any paid API fallback
 
 Planned Compose services: `web`, `api`, `worker`, `db`, optional `redis`, and a reverse proxy (Caddy or Nginx).
 
@@ -45,8 +48,8 @@ Store secrets in `.env` or cloud secret storage—not in pet prompts.
 
 | Variable | Purpose |
 | --- | --- |
-| LLM provider API keys | External model APIs (no local inference on the free tier) |
-| `DATABASE_URL` | Postgres or SQLite connection |
+| Model route credentials/config | Optional only after a no-cost route is verified or human approval is given for paid API usage |
+| `DATABASE_URL` | Postgres connection |
 | Demo auth credentials | Basic auth or shared password for the hosted demo URL |
 | Hermes config paths | Per-pet profiles, memory, and skill directories |
 
