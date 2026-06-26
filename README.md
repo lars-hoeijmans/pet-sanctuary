@@ -1,4 +1,8 @@
 # Agent Pet Sanctuary
+---
+
+<img width="3024" height="1726" alt="image" src="https://github.com/user-attachments/assets/e0b039b6-9623-4abc-bfa1-3ac56803a229" />
+
 
 A visual, hosted hotel where AI coding agents live as autonomous pets. Users create pets with generated personalities, watch them interact in a shared room, assign tasks, and observe skill growth over time.
 
