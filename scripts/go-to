@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+API="${API_URL:-http://localhost:3001}"
+PET="${1:-mochi}"
+TARGET="${2:-lamp}"
+
+room=$(curl -sf "$API/rooms/main" 2>/dev/null) || {
+  echo "Sanctuary unreachable — try: docker compose up"
+  echo "Plan: $PET -> left_wall -> desk_2 -> $TARGET"
+  exit 0
+}
+
+object=$(echo "$room" | jq -r --arg t "$TARGET" '.objects[] | select(.type | ascii_downcase == ($t | ascii_downcase))')
+pet=$(echo "$room" | jq -r --arg p "$PET" '.pets[] | select(.name | ascii_downcase == ($p | ascii_downcase))')
+[ -z "$object" ] && { echo "No $TARGET visible in room"; exit 1; }
+[ -z "$pet" ] && { echo "Pet $PET not found"; exit 1; }
+
+ox=$(echo "$object" | jq -r '.position.x')
+oy=$(echo "$object" | jq -r '.position.y')
+px=$(echo "$pet" | jq -r '.position.x')
+py=$(echo "$pet" | jq -r '.position.y')
+dx=$((ox - px)); dy=$((oy - py))
+dist=$(echo "scale=1; sqrt(($dx)^2 + ($dy)^2)" | bc -l 2>/dev/null || echo "?")
+echo "$PET -> $TARGET: ($px,$py) -> ($ox,$oy)  ~${dist}u"

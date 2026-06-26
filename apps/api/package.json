@@ -6,6 +6,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "dev": "node --watch --loader ts-node/esm src/main.ts",
+    "dev:ai": "SANCTUARY_AI_ENABLED=true SANCTUARY_AGENT_BACKEND=opencode SANCTUARY_AGENT_MODEL=opencode/mimo-v2.5-free SANCTUARY_AGENT_FAST_MODEL=opencode/mimo-v2.5-free SANCTUARY_LLM_TIMEOUT_MS=120000 SIMULATION_TICK_MS=15000 node --watch --loader ts-node/esm src/main.ts",
     "start": "node dist/main.js",
     "start:dev": "node --watch --loader ts-node/esm src/main.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",

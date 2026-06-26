@@ -65,6 +65,23 @@ export class LivingRoomService implements OnModuleInit, OnModuleDestroy {
     return createRuntimeWithFallback(observation.pet.runtime).decideAction(observation);
   };
 
+  /**
+   * Serializes every room-mutating operation. Ticks are timer-driven and model
+   * calls take seconds, so a tick can otherwise fire while an HTTP handler
+   * (createTask, createPet, …) is mid-flight — both `load → mutate → save` the same
+   * in-memory room and the later save silently clobbers the other's writes. Running
+   * all mutations through this lock makes them atomic with respect to each other.
+   */
+  private writeLock: Promise<unknown> = Promise.resolve();
+  private exclusive<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.writeLock.then(fn, fn);
+    this.writeLock = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  }
+
   constructor(
     @Inject(LIVING_ROOM_REPOSITORY)
     private readonly repository: LivingRoomRepository
@@ -98,134 +115,146 @@ export class LivingRoomService implements OnModuleInit, OnModuleDestroy {
   }
 
   async resetMainRoom(seed = DEFAULT_MAIN_ROOM_SEED): Promise<RoomResponse> {
-    const snapshot = await this.repository.resetMainRoom(seed);
-    await this.publishSnapshot(snapshot, snapshot.events.at(-1));
-    return {
-      snapshot,
-      simulation: this.getSimulationStatus(snapshot)
-    };
-  }
-
-  async pause(): Promise<RoomResponse> {
-    const snapshot = await this.repository.loadMainRoom();
-    if (!snapshot.room.paused) {
-      const next = pauseSimulation(snapshot);
-      const event = next.events.at(-1);
-      await this.repository.saveMainRoom(next);
-      await this.publishSnapshot(next, event);
-      return {
-        snapshot: next,
-        simulation: this.getSimulationStatus(next)
-      };
-    }
-
-    return {
-      snapshot,
-      simulation: this.getSimulationStatus(snapshot)
-    };
-  }
-
-  async resume(): Promise<RoomResponse> {
-    const snapshot = await this.repository.loadMainRoom();
-    if (snapshot.room.paused) {
-      const next = resumeSimulation(snapshot);
-      const event = next.events.at(-1);
-      await this.repository.saveMainRoom(next);
-      await this.publishSnapshot(next, event);
-      return {
-        snapshot: next,
-        simulation: this.getSimulationStatus(next)
-      };
-    }
-
-    return {
-      snapshot,
-      simulation: this.getSimulationStatus(snapshot)
-    };
-  }
-
-  async tickOnce(): Promise<RoomResponse> {
-    const snapshot = await this.repository.loadMainRoom();
-    if (snapshot.room.paused) {
+    return this.exclusive(async () => {
+      const snapshot = await this.repository.resetMainRoom(seed);
+      await this.publishSnapshot(snapshot, snapshot.events.at(-1));
       return {
         snapshot,
         simulation: this.getSimulationStatus(snapshot)
       };
-    }
+    });
+  }
 
-    // Real, model-driven tick: each eligible pet decides through its own runtime
-    // (Hermes/Codex or opencode/Copilot), with deterministic fallback on failure.
-    const ticked = await runAgentTickAsync(snapshot, this.chooseAgentAction);
-    // Tasks that reached "in_progress" during the tick are executed by their
-    // agent runtime (a real LLM agent when enabled) so they actually finish.
-    const executed = await this.runRunnableTasks(ticked);
-    const next = executed.snapshot;
-    const newEvents = next.events.slice(snapshot.events.length);
-    await this.repository.saveMainRoom(next);
-    const simulation = this.getSimulationStatus(next);
-    for (const event of newEvents) {
-      await this.publish({ snapshot: next, event, simulation });
-    }
+  async pause(): Promise<RoomResponse> {
+    return this.exclusive(async () => {
+      const snapshot = await this.repository.loadMainRoom();
+      if (!snapshot.room.paused) {
+        const next = pauseSimulation(snapshot);
+        const event = next.events.at(-1);
+        await this.repository.saveMainRoom(next);
+        await this.publishSnapshot(next, event);
+        return {
+          snapshot: next,
+          simulation: this.getSimulationStatus(next)
+        };
+      }
 
-    if (newEvents.length === 0) {
-      await this.publishSnapshot(next);
-    }
+      return {
+        snapshot,
+        simulation: this.getSimulationStatus(snapshot)
+      };
+    });
+  }
 
-    return { snapshot: next, simulation };
+  async resume(): Promise<RoomResponse> {
+    return this.exclusive(async () => {
+      const snapshot = await this.repository.loadMainRoom();
+      if (snapshot.room.paused) {
+        const next = resumeSimulation(snapshot);
+        const event = next.events.at(-1);
+        await this.repository.saveMainRoom(next);
+        await this.publishSnapshot(next, event);
+        return {
+          snapshot: next,
+          simulation: this.getSimulationStatus(next)
+        };
+      }
+
+      return {
+        snapshot,
+        simulation: this.getSimulationStatus(snapshot)
+      };
+    });
+  }
+
+  async tickOnce(): Promise<RoomResponse> {
+    return this.exclusive(async () => {
+      const snapshot = await this.repository.loadMainRoom();
+      if (snapshot.room.paused) {
+        return {
+          snapshot,
+          simulation: this.getSimulationStatus(snapshot)
+        };
+      }
+
+      // Real, model-driven tick: each eligible pet decides through its own runtime
+      // (Hermes/Codex or opencode/Copilot), with deterministic fallback on failure.
+      const ticked = await runAgentTickAsync(snapshot, this.chooseAgentAction);
+      // Tasks that reached "in_progress" during the tick are executed by their
+      // agent runtime (a real LLM agent when enabled) so they actually finish.
+      const executed = await this.runRunnableTasks(ticked);
+      const next = executed.snapshot;
+      const newEvents = next.events.slice(snapshot.events.length);
+      await this.repository.saveMainRoom(next);
+      const simulation = this.getSimulationStatus(next);
+      for (const event of newEvents) {
+        await this.publish({ snapshot: next, event, simulation });
+      }
+
+      if (newEvents.length === 0) {
+        await this.publishSnapshot(next);
+      }
+
+      return { snapshot: next, simulation };
+    });
   }
 
   async injectRoomEvent(request: CreateRoomEventRequest): Promise<RoomResponse> {
-    const snapshot = await this.repository.loadMainRoom();
-    const timestamp = new Date().toISOString();
-    const event = createRoomNoticeEvent(snapshot, request, timestamp);
-    const result = await processWorldEventAsync(snapshot, event, timestamp, this.chooseAgentAction);
-    await this.repository.saveMainRoom(result.snapshot);
+    return this.exclusive(async () => {
+      const snapshot = await this.repository.loadMainRoom();
+      const timestamp = new Date().toISOString();
+      const event = createRoomNoticeEvent(snapshot, request, timestamp);
+      const result = await processWorldEventAsync(snapshot, event, timestamp, this.chooseAgentAction);
+      await this.repository.saveMainRoom(result.snapshot);
 
-    const simulation = this.getSimulationStatus(result.snapshot);
-    for (const createdEvent of result.events) {
-      await this.publish({ snapshot: result.snapshot, event: createdEvent, simulation });
-    }
+      const simulation = this.getSimulationStatus(result.snapshot);
+      for (const createdEvent of result.events) {
+        await this.publish({ snapshot: result.snapshot, event: createdEvent, simulation });
+      }
 
-    return {
-      snapshot: result.snapshot,
-      simulation
-    };
+      return {
+        snapshot: result.snapshot,
+        simulation
+      };
+    });
   }
 
   // --- Tasks & collaboration (Phase 2) -----------------------------------
 
   async createTask(request: CreateTaskRequest): Promise<CreateTaskResponse> {
-    const snapshot = await this.repository.loadMainRoom();
-    if (request.assignedPetId && !snapshot.pets.some((pet) => pet.id === request.assignedPetId)) {
-      throw new BadRequestException(`Assigned pet ${request.assignedPetId} does not exist.`);
-    }
+    return this.exclusive(async () => {
+      const snapshot = await this.repository.loadMainRoom();
+      if (request.assignedPetId && !snapshot.pets.some((pet) => pet.id === request.assignedPetId)) {
+        throw new BadRequestException(`Assigned pet ${request.assignedPetId} does not exist.`);
+      }
 
-    const timestamp = new Date().toISOString();
-    const collected: WorldEvent[] = [];
+      const timestamp = new Date().toISOString();
+      const collected: WorldEvent[] = [];
 
-    // 1. Record the task and let every active pet perceive it (some may claim).
-    const created = createTask(snapshot, request, "manager", timestamp);
-    let next = created.snapshot;
-    const taskId = created.task.id;
-    // processWorldEvent won't re-emit the already-present TaskCreated event, so
-    // publish it explicitly to keep the broadcast stream complete.
-    collected.push(created.event);
+      // 1. Record the task and let every active pet perceive it (some may claim).
+      const created = createTask(snapshot, request, "manager", timestamp);
+      let next = created.snapshot;
+      const taskId = created.task.id;
+      // processWorldEvent won't re-emit the already-present TaskCreated event, so
+      // publish it explicitly to keep the broadcast stream complete.
+      collected.push(created.event);
 
-    const processed = await processWorldEventAsync(next, created.event, timestamp, this.chooseAgentAction);
-    next = processed.snapshot;
-    collected.push(...processed.events);
+      const processed = await processWorldEventAsync(next, created.event, timestamp, this.chooseAgentAction);
+      next = processed.snapshot;
+      collected.push(...processed.events);
 
-    // 2. If nobody claimed it, assign it to the best available pet.
-    next = this.ensureTaskAssigned(next, taskId, collected, timestamp);
+      // 2. If nobody claimed it, assign it to the best available pet.
+      next = this.ensureTaskAssigned(next, taskId, collected, timestamp);
 
-    // 3. Drive the assigned pet to a desk and run the task to completion.
-    const driven = await this.driveAndRunTasks(next);
-    next = driven.snapshot;
-    collected.push(...driven.events);
+      // 3. Drive the assigned pet to a desk and run the task to completion.
+      const driven = await this.driveAndRunTasks(next);
+      next = driven.snapshot;
+      collected.push(...driven.events);
 
-    const finalTask = getTask(next, taskId);
-    const response = await this.persistAndPublish(next, collected);
-    return { ...response, task: finalTask ?? created.task };
+      const finalTask = getTask(next, taskId);
+      const response = await this.persistAndPublish(next, collected);
+      return { ...response, task: finalTask ?? created.task };
+    });
   }
 
   async listTasks(): Promise<Task[]> {
@@ -241,32 +270,34 @@ export class LivingRoomService implements OnModuleInit, OnModuleDestroy {
   }
 
   async createPet(request: CreatePetRequest): Promise<CreatePetResponse> {
-    const snapshot = await this.repository.loadMainRoom();
-    const timestamp = new Date().toISOString();
-    const traits = request.traits ?? rollTraits(request.seed);
+    return this.exclusive(async () => {
+      const snapshot = await this.repository.loadMainRoom();
+      const timestamp = new Date().toISOString();
+      const traits = request.traits ?? rollTraits(request.seed);
 
-    const created = createPet(
-      snapshot,
-      {
-        traits,
-        name: request.name,
-        position: request.position,
-        runtime: request.runtime,
-        seed: request.seed
-      },
-      timestamp
-    );
-    let next = created.snapshot;
-    const collected: WorldEvent[] = [...created.events];
+      const created = createPet(
+        snapshot,
+        {
+          traits,
+          name: request.name,
+          position: request.position,
+          runtime: request.runtime,
+          seed: request.seed
+        },
+        timestamp
+      );
+      let next = created.snapshot;
+      const collected: WorldEvent[] = [...created.events];
 
-    // Let existing pets react to the newcomer (real, in-character reactions).
-    const processed = await processWorldEventAsync(next, created.events[0]!, timestamp, this.chooseAgentAction);
-    next = processed.snapshot;
-    collected.push(...processed.events.filter((event) => event.id !== created.events[0]!.id));
+      // Let existing pets react to the newcomer (real, in-character reactions).
+      const processed = await processWorldEventAsync(next, created.events[0]!, timestamp, this.chooseAgentAction);
+      next = processed.snapshot;
+      collected.push(...processed.events.filter((event) => event.id !== created.events[0]!.id));
 
-    const pet = next.pets.find((candidate) => candidate.id === created.petId)!;
-    const response = await this.persistAndPublish(next, collected);
-    return { ...response, pet };
+      const pet = next.pets.find((candidate) => candidate.id === created.petId)!;
+      const response = await this.persistAndPublish(next, collected);
+      return { ...response, pet };
+    });
   }
 
   async listPets(): Promise<Pet[]> {
@@ -295,19 +326,21 @@ export class LivingRoomService implements OnModuleInit, OnModuleDestroy {
   }
 
   async resolveApproval(approvalId: string, request: ResolveApprovalRequest): Promise<ResolveApprovalResponse> {
-    const snapshot = await this.repository.loadMainRoom();
-    const approval = snapshot.approvals.find((candidate) => candidate.id === approvalId);
-    if (!approval) {
-      throw new NotFoundException(`Approval ${approvalId} not found.`);
-    }
-    if (approval.status !== "pending") {
-      throw new BadRequestException(`Approval ${approvalId} is already ${approval.status}.`);
-    }
+    return this.exclusive(async () => {
+      const snapshot = await this.repository.loadMainRoom();
+      const approval = snapshot.approvals.find((candidate) => candidate.id === approvalId);
+      if (!approval) {
+        throw new NotFoundException(`Approval ${approvalId} not found.`);
+      }
+      if (approval.status !== "pending") {
+        throw new BadRequestException(`Approval ${approvalId} is already ${approval.status}.`);
+      }
 
-    const timestamp = new Date().toISOString();
-    const resolved = resolveSkillApproval(snapshot, approvalId, request.decision, request.resolvedBy, timestamp);
-    const response = await this.persistAndPublish(resolved.snapshot, resolved.events);
-    return { ...response, approval: resolved.approval };
+      const timestamp = new Date().toISOString();
+      const resolved = resolveSkillApproval(snapshot, approvalId, request.decision, request.resolvedBy, timestamp);
+      const response = await this.persistAndPublish(resolved.snapshot, resolved.events);
+      return { ...response, approval: resolved.approval };
+    });
   }
 
   getSimulationStatus(snapshot: RoomSnapshot): SimulationStatus {
@@ -463,36 +496,38 @@ export class LivingRoomService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async patchPet(petId: string, patch: Partial<Pet>): Promise<RoomResponse> {
-    const snapshot = await this.repository.loadMainRoom();
-    const pet = snapshot.pets.find((candidate) => candidate.id === petId);
-    if (!pet) {
-      throw new NotFoundException(`Pet ${petId} not found.`);
-    }
+    return this.exclusive(async () => {
+      const snapshot = await this.repository.loadMainRoom();
+      const pet = snapshot.pets.find((candidate) => candidate.id === petId);
+      if (!pet) {
+        throw new NotFoundException(`Pet ${petId} not found.`);
+      }
 
-    const timestamp = new Date().toISOString();
-    const pets = snapshot.pets.map((candidate) => (candidate.id === petId ? { ...candidate, ...patch } : candidate));
-    const eventType =
-      patch.archived === true ? "PetArchived" : patch.status === "paused" ? "PetPaused" : "PetUnpaused";
-    const event = createWorldEvent({
-      snapshot: { room: snapshot.room, events: snapshot.events },
-      type: eventType,
-      timestamp,
-      actorPetId: petId,
-      payload: {
-        petId,
-        summary:
-          patch.archived === true
-            ? `${pet.name} was archived.`
-            : patch.status === "paused"
-              ? `${pet.name} was paused.`
-              : `${pet.name} resumed.`
-      },
-      visibility: "system",
-      significance: "medium"
+      const timestamp = new Date().toISOString();
+      const pets = snapshot.pets.map((candidate) => (candidate.id === petId ? { ...candidate, ...patch } : candidate));
+      const eventType =
+        patch.archived === true ? "PetArchived" : patch.status === "paused" ? "PetPaused" : "PetUnpaused";
+      const event = createWorldEvent({
+        snapshot: { room: snapshot.room, events: snapshot.events },
+        type: eventType,
+        timestamp,
+        actorPetId: petId,
+        payload: {
+          petId,
+          summary:
+            patch.archived === true
+              ? `${pet.name} was archived.`
+              : patch.status === "paused"
+                ? `${pet.name} was paused.`
+                : `${pet.name} resumed.`
+        },
+        visibility: "system",
+        significance: "medium"
+      });
+
+      const next: RoomSnapshot = { ...snapshot, pets, events: [...snapshot.events, event] };
+      return this.persistAndPublish(next, [event]);
     });
-
-    const next: RoomSnapshot = { ...snapshot, pets, events: [...snapshot.events, event] };
-    return this.persistAndPublish(next, [event]);
   }
 
   private async persistAndPublish(snapshot: RoomSnapshot, events: WorldEvent[]): Promise<RoomResponse> {

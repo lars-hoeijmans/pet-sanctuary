@@ -133,12 +133,20 @@ export interface ParsedTaskResponse {
   learnedSkill: { name: string; description: string; purpose: string | null } | null;
 }
 
+/** Strip a wrapping ```lang ... ``` markdown fence some models add around artifacts. */
+function stripCodeFence(text: string): string {
+  const fenced = text.match(/^```[^\n]*\n([\s\S]*?)\n?```$/);
+  return fenced?.[1]?.trim() ?? text;
+}
+
 /** Parse the delimited task response. Returns null only if no summary is present. */
 export function parseTaskResponse(raw: string): ParsedTaskResponse | null {
   if (!raw) return null;
   const markerIndex = raw.indexOf("---ARTIFACT---");
   const header = markerIndex === -1 ? raw : raw.slice(0, markerIndex);
-  const artifactContent = markerIndex === -1 ? "" : raw.slice(markerIndex + "---ARTIFACT---".length).trim();
+  const artifactContent = stripCodeFence(
+    markerIndex === -1 ? "" : raw.slice(markerIndex + "---ARTIFACT---".length).trim()
+  );
 
   const field = (key: string): string | null => {
     const match = header.match(new RegExp(`^\\s*${key}:\\s*(.+)$`, "im"));
