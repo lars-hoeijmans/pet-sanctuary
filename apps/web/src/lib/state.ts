@@ -14,7 +14,6 @@ export type SanctuaryState = {
   loading: boolean;
   error?: string;
   socket: SocketConnectionState;
-  localTick: number;
 };
 
 export type SanctuaryAction =
@@ -26,7 +25,6 @@ export type SanctuaryAction =
   | { type: "apply_event"; event: WorldEvent }
   | { type: "set_paused"; paused: boolean; createdAt: string }
   | { type: "reset_seed" }
-  | { type: "local_tick"; createdAt: string }
   | { type: "socket_status"; status: SocketConnectionState; message?: string };
 
 export function createInitialState(snapshot: RoomSnapshot = SEED_SNAPSHOT): SanctuaryState {
@@ -35,8 +33,7 @@ export function createInitialState(snapshot: RoomSnapshot = SEED_SNAPSHOT): Sanc
     selectedPetId: snapshot.pets[0]?.id ?? "",
     source: "seed-fallback",
     loading: true,
-    socket: "idle",
-    localTick: 0
+    socket: "idle"
   };
 }
 
@@ -48,10 +45,13 @@ export function sanctuaryReducer(
     case "load_start":
       return { ...state, loading: true, error: undefined };
     case "load_success":
-      return withSnapshot(state, action.snapshot, action.source, {
-        loading: false,
-        error: undefined
-      });
+      return withSnapshot(
+        state,
+        action.snapshot,
+        action.source,
+        { loading: false, error: undefined },
+        true
+      );
     case "load_error":
       return {
         ...state,
@@ -62,10 +62,13 @@ export function sanctuaryReducer(
     case "select_pet":
       return { ...state, selectedPetId: action.petId };
     case "apply_snapshot":
-      return withSnapshot(state, action.snapshot, action.source ?? state.source, {
-        loading: false,
-        error: undefined
-      });
+      return withSnapshot(
+        state,
+        action.snapshot,
+        action.source ?? state.source,
+        { loading: false, error: undefined },
+        true
+      );
     case "apply_event":
       return applyWorldEvent(state, action.event);
     case "set_paused":
@@ -73,11 +76,8 @@ export function sanctuaryReducer(
     case "reset_seed":
       return withSnapshot(state, SEED_SNAPSHOT, "seed-fallback", {
         loading: false,
-        error: undefined,
-        localTick: 0
+        error: undefined
       });
-    case "local_tick":
-      return applyLocalTick(state, action.createdAt);
     case "socket_status":
       return {
         ...state,
@@ -93,15 +93,35 @@ function withSnapshot(
   state: SanctuaryState,
   snapshot: RoomSnapshot,
   source: SnapshotSource,
-  overrides: Partial<SanctuaryState> = {}
+  overrides: Partial<SanctuaryState> = {},
+  // Live updates (socket/api) carry no per-pet responseLevel or speech (the
+  // contract Pet has neither); those are event-derived. Preserve the prior
+  // values for still-present pets so an unrelated snapshot doesn't reset a
+  // working pet's response or wipe its active speech bubble. A fresh seed/reset
+  // deliberately does NOT preserve (it should restore defaults).
+  preservePetView = false
 ): SanctuaryState {
   const selectedPetStillExists = snapshot.pets.some((pet) => pet.id === state.selectedPetId);
 
+  let nextSnapshot = snapshot;
+  if (preservePetView) {
+    const priorById = new Map(state.snapshot.pets.map((pet) => [pet.id, pet]));
+    nextSnapshot = {
+      ...snapshot,
+      pets: snapshot.pets.map((pet) => {
+        const prior = priorById.get(pet.id);
+        return prior
+          ? { ...pet, responseLevel: prior.responseLevel, currentSpeech: prior.currentSpeech }
+          : pet;
+      })
+    };
+  }
+
   return {
     ...state,
-    snapshot,
+    snapshot: nextSnapshot,
     source,
-    selectedPetId: selectedPetStillExists ? state.selectedPetId : snapshot.pets[0]?.id ?? "",
+    selectedPetId: selectedPetStillExists ? state.selectedPetId : nextSnapshot.pets[0]?.id ?? "",
     ...overrides
   };
 }
@@ -150,62 +170,6 @@ function setPaused(state: SanctuaryState, paused: boolean, createdAt: string): S
   };
 }
 
-function applyLocalTick(state: SanctuaryState, createdAt: string): SanctuaryState {
-  if (state.snapshot.paused || state.source !== "seed-fallback") {
-    return state;
-  }
-
-  const nextTick = state.localTick + 1;
-  const script = LOCAL_TICK_SCRIPT[(nextTick - 1) % LOCAL_TICK_SCRIPT.length];
-  const event: WorldEvent = {
-    id: `local-tick-${nextTick}`,
-    type: script.type,
-    summary: script.summary,
-    createdAt,
-    actorPetId: script.petId,
-    responseLevel: script.responseLevel,
-    significance: script.significance,
-    payload: script.message ? { message: script.message } : undefined
-  };
-
-  const pets = state.snapshot.pets.map((pet) => {
-    if (pet.id !== script.petId) {
-      return pet;
-    }
-
-    return {
-      ...pet,
-      status: script.status,
-      responseLevel: script.responseLevel,
-      position: clampPosition(
-        {
-          x: pet.position.x + script.move.x,
-          y: pet.position.y + script.move.y
-        },
-        state.snapshot.grid.width,
-        state.snapshot.grid.height
-      ),
-      currentSpeech: script.message
-        ? {
-            message: script.message,
-            createdAt
-          }
-        : pet.currentSpeech
-    };
-  });
-
-  return {
-    ...state,
-    localTick: nextTick,
-    snapshot: {
-      ...state.snapshot,
-      pets,
-      events: [event, ...state.snapshot.events].slice(0, 80),
-      updatedAt: createdAt
-    }
-  };
-}
-
 function applyEventToPet(pet: Pet, event: WorldEvent): Pet {
   if (event.actorPetId !== pet.id) {
     return pet;
@@ -244,62 +208,3 @@ function applyEventToPet(pet: Pet, event: WorldEvent): Pet {
     responseLevel: event.responseLevel ?? pet.responseLevel
   };
 }
-
-function clampPosition(position: { x: number; y: number }, width: number, height: number) {
-  return {
-    x: Math.max(0, Math.min(width - 1, position.x)),
-    y: Math.max(0, Math.min(height - 1, position.y))
-  };
-}
-
-const LOCAL_TICK_SCRIPT: Array<{
-  petId: string;
-  type: WorldEvent["type"];
-  summary: string;
-  message?: string;
-  status: Pet["status"];
-  responseLevel: Pet["responseLevel"];
-  significance: WorldEvent["significance"];
-  move: { x: number; y: number };
-}> = [
-  {
-    petId: "pet-pip",
-    type: "PetSaid",
-    summary: "Pip flagged the flickering lamp as a reversible object event.",
-    message: "Lamp flicker reproduced. Reversible, logged, suspicious.",
-    status: "reacting",
-    responseLevel: "ambient_reaction",
-    significance: "low",
-    move: { x: 1, y: -1 }
-  },
-  {
-    petId: "pet-mochi",
-    type: "PetSaid",
-    summary: "Mochi summarized the latest room activity for the pets.",
-    message: "Three events, no unsafe actions, state is still tidy.",
-    status: "observing",
-    responseLevel: "social_response",
-    significance: "medium",
-    move: { x: 1, y: 0 }
-  },
-  {
-    petId: "pet-nova",
-    type: "PetStartedWork",
-    summary: "Nova moved closer to the build desk and continued deterministic work.",
-    message: "I am keeping this deterministic until the API takes over.",
-    status: "working",
-    responseLevel: "task_action",
-    significance: "medium",
-    move: { x: -1, y: 0 }
-  },
-  {
-    petId: "pet-pip",
-    type: "PetOfferedHelp",
-    summary: "Pip offered Mochi a compact event-feed check.",
-    message: "Mochi, I can watch for duplicate event IDs.",
-    status: "helping",
-    responseLevel: "social_response",
-    significance: "medium",
-    move: { x: 0, y: 1 }
-  }
-];

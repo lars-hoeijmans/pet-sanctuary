@@ -12,21 +12,29 @@ import {
   WifiOff
 } from "lucide-react";
 import type { CSSProperties } from "react";
-import { useEffect, useMemo, useReducer, useState } from "react";
-import type { Pet, RoomObject, WorldEvent } from "@/lib/contracts";
+import { useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { createSeedRoomSnapshot, runDeterministicTick } from "@pet-sanctuary/domain";
+import type { Pet, WorldEvent } from "@/lib/contracts";
 import {
   connectRoomSocket,
   fetchRoomSnapshot,
+  normalizeContractEvent,
+  normalizeContractSnapshot,
   resetRoomToSeed,
   setSimulationPaused,
   triggerMeaningfulRoomEvent
 } from "@/lib/sanctuary-client";
 import { SEED_SNAPSHOT } from "@/lib/seed";
 import { createInitialState, sanctuaryReducer } from "@/lib/state";
+import { SanctuaryStage } from "@/components/SanctuaryStage";
 
 export function LivingRoomKernel() {
   const [state, dispatch] = useReducer(sanctuaryReducer, SEED_SNAPSHOT, createInitialState);
   const [triggeringEvent, setTriggeringEvent] = useState(false);
+  // Holds the offline simulation's contract snapshot. When no API is reachable
+  // we advance it with the SAME domain kernel the server runs, so the offline
+  // room behaves identically to a live one (zero divergence).
+  const offlineRoom = useRef<ReturnType<typeof createSeedRoomSnapshot> | null>(null);
 
   const selectedPet = useMemo(
     () => state.snapshot.pets.find((pet) => pet.id === state.selectedPetId) ?? state.snapshot.pets[0],
@@ -74,18 +82,38 @@ export function LivingRoomKernel() {
   }, []);
 
   useEffect(() => {
-    if (state.source !== "seed-fallback") {
+    if (state.source !== "seed-fallback" || state.snapshot.paused) {
       return;
     }
 
+    if (!offlineRoom.current) {
+      offlineRoom.current = createSeedRoomSnapshot();
+    }
+
     const timer = window.setInterval(() => {
-      dispatch({ type: "local_tick", createdAt: new Date().toISOString() });
+      const current = offlineRoom.current;
+      if (!current) {
+        return;
+      }
+      const next = runDeterministicTick(current, new Date().toISOString());
+      const newEvents = next.events.slice(current.events.length);
+      offlineRoom.current = next;
+      dispatch({
+        type: "apply_snapshot",
+        snapshot: normalizeContractSnapshot(next),
+        source: "seed-fallback"
+      });
+      // Replay this tick's events so per-pet speech/response (event-derived,
+      // absent from the contract Pet) populate offline exactly as they do live.
+      for (const event of newEvents) {
+        dispatch({ type: "apply_event", event: normalizeContractEvent(event) });
+      }
     }, 6000);
 
     return () => {
       window.clearInterval(timer);
     };
-  }, [state.source]);
+  }, [state.source, state.snapshot.paused]);
 
   async function handlePauseToggle() {
     const paused = !state.snapshot.paused;
@@ -107,6 +135,8 @@ export function LivingRoomKernel() {
   }
 
   async function handleReset() {
+    // Drop the offline simulation so it re-seeds from a fresh kernel snapshot.
+    offlineRoom.current = null;
     dispatch({ type: "reset_seed" });
 
     try {
@@ -214,11 +244,24 @@ export function LivingRoomKernel() {
             </div>
           </div>
 
-          <RoomGrid
-            gridWidth={state.snapshot.grid.width}
-            gridHeight={state.snapshot.grid.height}
-            objects={state.snapshot.objects}
-            pets={state.snapshot.pets}
+          <nav className="pet-roster" aria-label="Select a pet">
+            {state.snapshot.pets.map((pet) => (
+              <button
+                key={pet.id}
+                type="button"
+                className={`pet-chip ${pet.id === state.selectedPetId ? "is-active" : ""}`}
+                aria-pressed={pet.id === state.selectedPetId}
+                onClick={() => dispatch({ type: "select_pet", petId: pet.id })}
+                style={{ "--accent": pet.accent } as CSSProperties}
+              >
+                <span className="pet-chip-dot" aria-hidden="true" />
+                {pet.name}
+              </button>
+            ))}
+          </nav>
+
+          <SanctuaryStage
+            snapshot={state.snapshot}
             selectedPetId={state.selectedPetId}
             onSelectPet={(petId) => dispatch({ type: "select_pet", petId })}
           />
@@ -255,80 +298,6 @@ function StatusPill({
       {connected ? <Wifi size={15} /> : <WifiOff size={15} />}
       {label}
     </span>
-  );
-}
-
-function RoomGrid({
-  gridWidth,
-  gridHeight,
-  objects,
-  pets,
-  selectedPetId,
-  onSelectPet
-}: {
-  gridWidth: number;
-  gridHeight: number;
-  objects: RoomObject[];
-  pets: Pet[];
-  selectedPetId: string;
-  onSelectPet: (petId: string) => void;
-}) {
-  return (
-    <div
-      className="room-grid"
-      style={
-        {
-          "--grid-width": gridWidth,
-          "--grid-height": gridHeight
-        } as CSSProperties
-      }
-    >
-      {objects.map((object) => (
-        <RoomObjectMarker
-          key={object.id}
-          object={object}
-          gridWidth={gridWidth}
-          gridHeight={gridHeight}
-        />
-      ))}
-
-      {pets.map((pet) => (
-        <button
-          className={`pet-token ${pet.id === selectedPetId ? "is-selected" : ""}`}
-          key={pet.id}
-          type="button"
-          onClick={() => onSelectPet(pet.id)}
-          title={`Inspect ${pet.name}`}
-          style={markerStyle(pet.position.x, pet.position.y, gridWidth, gridHeight, pet.accent)}
-        >
-          {pet.currentSpeech ? <span className="speech-bubble">{pet.currentSpeech.message}</span> : null}
-          <span className="pet-avatar" aria-hidden="true">
-            {pet.avatar}
-          </span>
-          <span className="pet-name">{pet.name}</span>
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function RoomObjectMarker({
-  object,
-  gridWidth,
-  gridHeight
-}: {
-  object: RoomObject;
-  gridWidth: number;
-  gridHeight: number;
-}) {
-  return (
-    <div
-      className={`room-object room-object-${object.kind}`}
-      style={objectStyle(object, gridWidth, gridHeight)}
-      title={`${object.label}: ${object.state ?? "ready"}`}
-    >
-      <span>{object.label}</span>
-    </div>
   );
 }
 
@@ -415,29 +384,6 @@ function EventFeed({ events, pets }: { events: WorldEvent[]; pets: Pet[] }) {
 
 function EmptyPanel({ label }: { label: string }) {
   return <p className="empty-panel">{label}</p>;
-}
-
-function markerStyle(
-  x: number,
-  y: number,
-  gridWidth: number,
-  gridHeight: number,
-  accent: string
-): CSSProperties {
-  return {
-    "--x": `${(x / Math.max(gridWidth - 1, 1)) * 100}%`,
-    "--y": `${(y / Math.max(gridHeight - 1, 1)) * 100}%`,
-    "--accent": accent
-  } as CSSProperties;
-}
-
-function objectStyle(object: RoomObject, gridWidth: number, gridHeight: number): CSSProperties {
-  return {
-    "--x": `${(object.position.x / Math.max(gridWidth, 1)) * 100}%`,
-    "--y": `${(object.position.y / Math.max(gridHeight, 1)) * 100}%`,
-    "--w": `${(object.width / Math.max(gridWidth, 1)) * 100}%`,
-    "--h": `${(object.height / Math.max(gridHeight, 1)) * 100}%`
-  } as CSSProperties;
 }
 
 function labelize(value: string) {

@@ -26,9 +26,6 @@
     "paths": {
       "@/*": [
         "./src/*"
-      ],
-      "@pet-sanctuary/contracts": [
-        "../../packages/contracts/src/index.ts"
       ]
     }
   },

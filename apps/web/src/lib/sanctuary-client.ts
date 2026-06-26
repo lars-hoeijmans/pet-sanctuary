@@ -158,7 +158,7 @@ function normalizeRoomUpdate(value: unknown): RoomSnapshot {
   return normalizeContractSnapshot(update.snapshot);
 }
 
-function normalizeContractSnapshot(snapshot: SanctuaryContractSnapshot): RoomSnapshot {
+export function normalizeContractSnapshot(snapshot: SanctuaryContractSnapshot): RoomSnapshot {
   if (!snapshot?.room) {
     throw new Error("Snapshot response did not include a room");
   }
@@ -180,6 +180,11 @@ function normalizeContractSnapshot(snapshot: SanctuaryContractSnapshot): RoomSna
     events: events.map(normalizeEvent).sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
     updatedAt: events.at(-1)?.timestamp ?? new Date().toISOString()
   };
+}
+
+/** Normalize a single contract event into the UI view-model event. */
+export function normalizeContractEvent(event: SanctuaryContractEvent): WorldEvent {
+  return normalizeEvent(event);
 }
 
 function normalizeEvent(value: unknown): WorldEvent {
@@ -259,6 +264,7 @@ function toViewObject(object: SanctuaryContractObject): RoomObject {
     id: object.id,
     label: labelForObject(object),
     kind,
+    type: object.type,
     position: object.position,
     width: kind === "desk" || kind === "seat" ? 2 : 1,
     height: 1,

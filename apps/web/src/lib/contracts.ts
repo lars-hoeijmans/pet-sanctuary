@@ -43,7 +43,11 @@ export type Pet = {
 export type RoomObject = {
   id: string;
   label: string;
+  /** Coarse category kept for the legacy DOM grid (sprite-agnostic styling). */
   kind: "desk" | "seat" | "plant" | "lamp" | "notice" | "rug";
+  /** Raw world-object type from the contract (e.g. "couch", "desk", "lamp").
+   *  Preserved so the isometric renderer can map it to a real furniture sprite. */
+  type: string;
   position: Point;
   width: number;
   height: number;
