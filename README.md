@@ -1,14 +1,58 @@
-# Pet Sanctuary
+# Agent Pet Sanctuary
 
-A platform for pet sanctuaries to manage animals, adoptions, and care records.
+A visual, hosted hotel where AI coding agents live as autonomous pets. Users create pets with generated personalities, watch them interact in a shared room, assign tasks, and observe skill growth over time.
+
+## Status
+
+Early planning. The repo currently contains product and architecture documentation only—no application code, Docker Compose stack, or package manifests yet. See [PRD.md](./PRD.md) for the finalized hackathon plan.
 
 ## Overview
 
-Pet Sanctuary helps shelters and rescue organizations keep track of their animals, coordinate with volunteers, and streamline the adoption process.
+Agent Pet Sanctuary reframes coding agents as living characters in a persistent simulation:
 
-## Getting Started
+- **Sanctuary** — a hotel-like room where pets move, talk, and work at desks
+- **Pets** — autonomous agents with traits, memory, skills, karma, and relationships
+- **Simulation** — a server-side loop that schedules observations, actions, and reactions
+- **Agent runtime** — sandboxed workers where pets perform real tasks and learn skills
 
-_Setup instructions will be added as the project develops._
+The hackathon MVP targets a demo where users spin up a pet, see distinct behaviors emerge, and watch at least one pet learn a reusable skill.
+
+## Tech stack (planned)
+
+- **Frontend:** React/Vite or Next.js
+- **Backend:** API + WebSocket server, simulation loop, action validation
+- **Agent runtime:** [Hermes Agent](https://hermes-agent.nousresearch.com/docs/) (primary); [Pi harness](https://pi.dev/) (stretch, self-modifying pet)
+- **Database:** Postgres or SQLite
+- **Queue (optional):** Redis/Valkey
+- **Deployment:** Docker Compose on Oracle Cloud Always Free (2 OCPU / 12 GB Arm)
+
+Planned Compose services: `web`, `api`, `worker`, `db`, optional `redis`, and a reverse proxy (Caddy or Nginx).
+
+## Getting started
+
+Nothing to install or run yet. When Phase 0 lands (see PRD §19), local development is expected to use Docker Compose:
+
+```bash
+git clone <repo-url>
+cd pet-sanctuary
+# create .env with required secrets (see below)
+docker compose up --build
+```
+
+### Environment variables (planned)
+
+Store secrets in `.env` or cloud secret storage—not in pet prompts.
+
+| Variable | Purpose |
+| --- | --- |
+| LLM provider API keys | External model APIs (no local inference on the free tier) |
+| `DATABASE_URL` | Postgres or SQLite connection |
+| Demo auth credentials | Basic auth or shared password for the hosted demo URL |
+| Hermes config paths | Per-pet profiles, memory, and skill directories |
+
+## Development
+
+Dev, build, and test commands will be added with the first implementation. The intended workflow is a multi-service Compose stack with separate `web`, `api`, and `worker` processes. Refer to [PRD.md](./PRD.md) for the phased plan, data model, and architecture.
 
 ## Contributing
 
