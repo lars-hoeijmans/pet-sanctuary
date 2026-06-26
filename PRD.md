@@ -26,7 +26,9 @@ Recommended implementation decisions:
 6. **Make destructive behavior reversible and virtual-only in v1.** “Destroy,” “steal,” or “sabotage” can exist as toy-world actions that affect room objects and karma, not host files, real repositories, credentials, or infrastructure.
 7. **Ship audio as stretch only.** Text bubbles and event logs are enough for the demo. Voices/music can be added if the main slice is stable.
 8. **Start with the living multi-agent core, not pet generation.** The first implementation slice should prove that multiple distinct hard-coded agents can inhabit the same persistent room, observe shared state, take validated actions, and produce visible events. Pet generation should be added after this core loop exists.
-9. **Use a TypeScript monorepo with Next.js and NestJS.** The product should be built as a pnpm/Turborepo monorepo with a Next.js frontend, NestJS backend, shared TypeScript domain/contracts packages, Postgres + Drizzle, Zod validation, and a staged agent-runtime adapter.
+9. **Use world-mediated collaboration, not private model-to-model chat.** Pets should communicate by creating visible world events such as speech, help offers, task claims, plans, reviews, and handoffs. Other pets notice those events through structured observations and may react later.
+10. **Use a TypeScript monorepo with Next.js and NestJS.** The product should be built as a pnpm/Turborepo monorepo with a Next.js frontend, NestJS backend, shared TypeScript domain/contracts packages, Postgres + Drizzle, Zod validation, and a staged agent-runtime adapter.
+11. **Treat the Vercel AI SDK as optional model-call plumbing only.** The AI SDK must not run the world server, simulation, collaboration protocol, permissions, or task orchestration. It can later be used inside an `AiSdkRuntime` adapter to ask a model for one structured proposed pet action.
 
 ---
 
@@ -228,6 +230,8 @@ This keeps token use predictable and works with non-vision models. Screenshots c
 
 Pets should run on a low-frequency simulation loop. They do not need to call an LLM every second. Most ticks can be cheap deterministic simulation; LLM calls should happen when a pet needs to speak, plan, work, or react to an important event.
 
+Models do not literally live inside the world server or continuously watch the database. The product should create that feeling through a server-owned attention system: world events are written to the event log, the orchestrator decides which pets are eligible to notice them, and selected pets are woken up to produce one proposed action.
+
 ### Pet states
 
 MVP states:
@@ -255,9 +259,36 @@ MVP actions:
 - `request_skill(name, purpose)`
 - `reflect(memory_note)`
 
+Collaboration actions that can be added during the task/collaboration slice:
+
+- `claim_task(task_id, reason)`
+- `decline_task(task_id, reason)`
+- `propose_plan(task_id, summary)`
+- `request_review(target_pet, task_id)`
+- `accept_help(target_pet, task_id)`
+- `handoff_task(target_pet, task_id, reason)`
+
+### Collaboration model
+
+Pets collaborate through the shared world state and append-only event log. A pet should not open an invisible private conversation with another pet, and one model output should never directly become another pet's system instruction. Inter-pet messages are untrusted world content.
+
+Example flow:
+
+1. The user creates a task.
+2. The world server records `TaskCreated`.
+3. The orchestrator scores which pets should notice the task based on role, proximity, current state, relationships, and availability.
+4. Selected pets receive compact observations that include the task and recent events.
+5. Pets propose actions such as `claim_task`, `offer_help`, `propose_plan`, or `request_review`.
+6. The server validates each proposal, applies accepted changes, records new events, and broadcasts them to the UI.
+7. Other pets observe those events on later ticks and may react.
+
+This creates team-like behavior while keeping the server authoritative and the interaction inspectable, replayable, and safe.
+
 ### Behavior selection
 
-Each tick, the orchestrator should decide whether a pet needs a model call. If yes, it sends the pet:
+Each tick or meaningful world event, the orchestrator should decide which pets, if any, should be woken up. A pet can be handled by deterministic policy, an optional structured model-call adapter, or a real agent runtime depending on its configuration and the current slice.
+
+When a pet is woken, the orchestrator sends it:
 
 - Its personality and current goals.
 - Compact world observation.
@@ -267,6 +298,8 @@ Each tick, the orchestrator should decide whether a pet needs a model call. If y
 - Safety policy.
 
 The agent returns a constrained JSON action. The orchestrator validates the action before applying it.
+
+For the Living Room Kernel and initial collaboration slice, use deterministic policies only. Add model-backed behavior later behind the same runtime interface.
 
 ### Acceptance criteria
 
@@ -455,12 +488,14 @@ Use a TypeScript-first monorepo:
 - **ORM/migrations:** Drizzle.
 - **Realtime:** NestJS WebSocket Gateway, using Socket.IO first for fast reconnection and client ergonomics.
 - **Queue:** BullMQ + Redis/Valkey once the worker needs durable jobs; skip this for the Living Room Kernel if the API process can run the tiny simulation loop directly.
-- **LLM structured actions:** Vercel AI SDK with strict schema outputs when agent-backed behavior begins.
-- **Agent runtime:** product-owned adapter interface with deterministic, AI SDK, Hermes, and optional Pi implementations.
+- **Optional structured model-call adapter:** Vercel AI SDK Core may be used inside `AiSdkRuntime` for schema-constrained proposed actions when agent-backed behavior begins.
+- **Agent runtime:** product-owned adapter interface with deterministic, optional `AiSdkRuntime`, Hermes, and optional Pi implementations.
 
 Do not make Next.js route handlers the main backend for the sanctuary. Next.js should own the UI/app shell. The sanctuary itself needs a long-running backend process for simulation ticks, WebSocket connections, action validation, event logging, worker dispatch, and agent-runtime calls.
 
 Do not make Hermes, Pi, LangChain, or any other agent framework the product orchestrator. The product should own the world engine and pet orchestration. Agent frameworks should sit behind a small adapter boundary.
+
+Do not make the Vercel AI SDK the world server, collaboration engine, task scheduler, permission layer, or source of truth. If used, it is only a provider-agnostic way to ask a model for one structured proposed action, personality profile, task summary, memory note, or skill proposal. The server still validates and applies or rejects the result.
 
 Recommended monorepo shape:
 
@@ -490,7 +525,7 @@ interface AgentRuntime {
 Implement runtime support in stages:
 
 1. `DeterministicRuntime`: seeded hard-coded pet policies for the Living Room Kernel.
-2. `AiSdkRuntime`: structured LLM action generation with Zod schemas.
+2. `AiSdkRuntime`: optional structured model-call adapter with Zod schemas; proposes actions but never mutates world state directly.
 3. `HermesRuntime`: real coding-agent task execution and skill growth.
 4. `PiRuntime`: optional self-modifying pet stretch path.
 
@@ -616,20 +651,21 @@ For a stretch “mad scientist pet that modifies its own tools”: **Pi**.
 
 1. User opens the sanctuary web app.
 2. API loads world state and pet state from DB.
-3. Simulation loop emits pet state changes over WebSocket.
-4. When a meaningful event occurs, orchestrator sends a compact observation to the selected pet agent.
-5. Agent returns a constrained JSON action.
-6. API validates action, applies world update, and logs event.
-7. If the action requires real work, API enqueues a worker job.
-8. Worker invokes Hermes/Pi in the pet’s profile/workspace/sandbox.
-9. Worker streams progress events back to API.
-10. Learned skill or output is persisted and shown in UI.
+3. Simulation loop and meaningful world events feed the pet attention system.
+4. The orchestrator decides which pets are eligible to notice or react.
+5. Selected pets receive compact observations and propose one constrained action.
+6. API validates each proposed action, applies accepted world updates, and logs events.
+7. WebSocket gateway broadcasts accepted state changes and events.
+8. If the action requires real work, API enqueues a worker job.
+9. Worker invokes Hermes/Pi in the pet’s profile/workspace/sandbox.
+10. Worker streams progress events back to API.
+11. Learned skill or output is persisted and shown in UI.
 
 ### Backend modules
 
 - `world_engine`: authoritative room state, pathing, objects, positions.
-- `pet_orchestrator`: pet scheduling, observation building, action validation.
-- `agent_runtime`: adapter boundary for deterministic policies, AI SDK structured actions, Hermes, and optional Pi.
+- `pet_orchestrator`: pet scheduling, attention scoring, observation building, action validation.
+- `agent_runtime`: adapter boundary for deterministic policies, optional AI SDK structured proposals, Hermes, and optional Pi.
 - `skill_manager`: skill records, approvals, UI state.
 - `karma_engine`: karma events and consequences.
 - `safety_policy`: permissions, sandbox selection, blocked actions.
@@ -641,7 +677,7 @@ For a stretch “mad scientist pet that modifies its own tools”: **Pi**.
 - `packages/domain`: pure TypeScript business logic for world state, pet policies, observations, actions, and deterministic simulation. This package should not depend on NestJS, Next.js, database clients, or agent frameworks.
 - `packages/contracts`: Zod schemas and shared DTOs used by the API, worker, and web app.
 - `packages/db`: Drizzle schema, migrations, and repository helpers.
-- `packages/agent-runtime`: adapters for deterministic policies, AI SDK structured actions, Hermes, and optional Pi.
+- `packages/agent-runtime`: adapters for deterministic policies, optional AI SDK structured proposals, Hermes, and optional Pi.
 - `packages/config`: environment parsing and shared configuration.
 
 Keep the core product logic framework-light. NestJS should wire modules together, expose HTTP/WebSocket APIs, and schedule/dispatch work; it should not become the place where all world logic is trapped.
@@ -671,6 +707,26 @@ Every agent call should include:
 - Allowed actions.
 - Safety constraints.
 - Expected JSON schema.
+
+### Agent communication contract
+
+Agents communicate by proposing actions that become world events after server validation. Direct model-to-model hidden chat is not part of the MVP architecture.
+
+For example, a pet saying something to another pet should flow through the world:
+
+```json
+{
+  "action": "say",
+  "target_pet": "byte",
+  "message": "I can draft the plan if you review the edge cases.",
+  "reason_visible": "Mochi prefers collaborative planning.",
+  "risk_level": "low"
+}
+```
+
+If valid, the server records a `PetSaid` event, displays a speech bubble, and includes that event in the target pet's later observation. The target pet can then respond, ignore it, offer help, claim a task, or take another valid action.
+
+The world server asks, “which pets should be allowed to react?” Each pet answers, “what do I propose doing?” The world server decides whether that proposal becomes reality.
 
 ### Agent output contract
 
@@ -790,17 +846,20 @@ Acceptance criteria:
 
 - Add manager command input.
 - Create simple user-assigned tasks.
+- Add world-mediated collaboration events for task creation, task claims, help offers, plans, review requests, and handoffs.
+- Add an attention/wake-up scoring system so pets appear to notice relevant world events.
 - Let pets move to desks before working.
 - Let another pet ask for or offer help.
 - Add relationship notes or affinity as lightweight state.
 - Show task status and collaboration events in the inspector/feed.
-- Keep actions virtual and deterministic unless an agent call is explicitly enabled.
+- Keep actions virtual and deterministic; do not require AI SDK, Hermes, or Pi for this slice.
 
 ### Phase 3 — Agent-backed behavior
 
-- Add optional LLM action generation for selected events through an `AiSdkRuntime`.
+- Add optional structured LLM action proposals for selected events through an `AiSdkRuntime`.
 - Keep deterministic policies as fallback.
 - Enforce strict JSON output schemas.
+- Ensure model outputs are proposals only; they must not mutate world state or execute tools directly.
 - Treat inter-pet dialogue as untrusted content.
 - Add per-pet model/provider/runtime configuration stubs.
 
