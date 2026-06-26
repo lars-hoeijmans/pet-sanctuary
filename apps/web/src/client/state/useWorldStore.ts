@@ -37,6 +37,7 @@ interface WorldStoreState {
   feedFilterAgentId: string | null;
   commandPaletteOpen: boolean;
   muted: boolean;
+  agentVolumes: Record<string, number>;
 
   // lifecycle
   init: () => void;
@@ -48,6 +49,7 @@ interface WorldStoreState {
   setFeedFilter: (id: string | null) => void;
   setCommandPaletteOpen: (open: boolean) => void;
   toggleMuted: () => void;
+  setAgentVolume: (id: string, volume: number) => void;
 
   // command surface (delegates to the source)
   playDemo: () => void;
@@ -75,6 +77,7 @@ export const useWorldStore = create<WorldStoreState>((set, get) => ({
   feedFilterAgentId: null,
   commandPaletteOpen: false,
   muted: false,
+  agentVolumes: {},
 
   init: () => {
     if (source) return; // guard against React 18 StrictMode double-invoke
@@ -114,6 +117,11 @@ export const useWorldStore = create<WorldStoreState>((set, get) => ({
       const muted = !state.muted;
       audioManager.setMuted(muted);
       return { muted };
+    }),
+  setAgentVolume: (id, volume) =>
+    set((state) => {
+      audioManager.setAgentVolume(id, volume);
+      return { agentVolumes: { ...state.agentVolumes, [id]: volume } };
     }),
 
   playDemo: () => source?.playDemo(),

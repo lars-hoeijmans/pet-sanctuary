@@ -23,6 +23,7 @@ class AudioManager {
   private music: HTMLAudioElement | null = null;
   private muted = false;
   private started = false;
+  private agentVolumes = new Map<string, number>();
   private unsub: (() => void) | null = null;
 
   async init(): Promise<void> {
@@ -67,8 +68,14 @@ class AudioManager {
     }
   }
 
+  setAgentVolume(agentId: string, volume: number): void {
+    this.agentVolumes.set(agentId, volume);
+  }
+
   private playLine(agentId: string, text: string): void {
     if (this.muted) return;
+    const volume = this.agentVolumes.get(agentId) ?? 1;
+    if (volume <= 0) return;
 
     // 1) Pre-rendered clip, if we have one — instant, zero latency.
     if (this.manifest) {
@@ -81,6 +88,7 @@ class AudioManager {
           el = new Audio(this.manifest.voice[key]);
           this.clips.set(key, el);
         }
+        el.volume = volume;
         this.play(el);
         return;
       }
@@ -91,7 +99,9 @@ class AudioManager {
     // appears. The <audio> element plays the HTTP stream progressively.
     const { voiceId } = voiceFor(agentId);
     const url = `/api/tts?voiceId=${encodeURIComponent(voiceId)}&model=${LIVE_MODEL}&text=${encodeURIComponent(text)}`;
-    this.play(new Audio(url));
+    const el = new Audio(url);
+    el.volume = volume;
+    this.play(el);
   }
 
   private play(el: HTMLAudioElement): void {
@@ -111,6 +121,8 @@ class AudioManager {
   setMuted(muted: boolean): void {
     this.muted = muted;
     if (!this.music) return;
+    // Set .muted (instant, race-proof) AND pause/resume playback.
+    this.music.muted = muted;
     if (muted) this.music.pause();
     else void this.music.play().catch(() => {});
   }

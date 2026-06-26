@@ -14,6 +14,8 @@ export function InspectorDrawer() {
   const followAgentId = useWorldStore((s) => s.followAgentId);
   const selectAgent = useWorldStore((s) => s.selectAgent);
   const toggleFollow = useWorldStore((s) => s.toggleFollow);
+  const volume = useWorldStore((s) => (selectedAgentId ? s.agentVolumes[selectedAgentId] ?? 1 : 1));
+  const setAgentVolume = useWorldStore((s) => s.setAgentVolume);
 
   const activity = useMemo(() => {
     if (!selectedAgentId) return [];
@@ -59,6 +61,21 @@ export function InspectorDrawer() {
           <LocateFixed size={14} /> Focus
         </button>
       </div>
+
+      <label className="inspector__volume">
+        <span className="inspector__volume-label">
+          Voice volume <span className="inspector__volume-value">{Math.round(volume * 100)}%</span>
+        </span>
+        <input
+          type="range"
+          min={0}
+          max={1}
+          step={0.05}
+          value={volume}
+          onChange={(e) => setAgentVolume(agent.id, Number(e.target.value))}
+          aria-label={`Voice volume for ${agent.name}`}
+        />
+      </label>
 
       <dl className="inspector__facts">
         <div>
