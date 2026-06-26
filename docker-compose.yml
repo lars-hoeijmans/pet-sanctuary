@@ -1,0 +1,123 @@
+# Full Agent City topology. NOTE: the frontend also runs standalone with just
+# `npm run dev` (client-side mock). This compose file is the "connect real agents
+# later" path — it runs the web app against the live world-server with five
+# independent agent containers.
+#
+# In this stack the web app uses VITE_WORLD_SOURCE=socket so it consumes the
+# real server instead of the client-side mock.
+
+services:
+  world-server:
+    build:
+      context: .
+      dockerfile: apps/world-server/Dockerfile
+    environment:
+      PORT: 3001
+      REDIS_URL: redis://redis:6379
+      NODE_ENV: development
+    ports:
+      - "3001:3001"
+    depends_on:
+      - redis
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    environment:
+      VITE_WORLD_SERVER_URL: http://localhost:3001
+      VITE_WORLD_SOURCE: socket
+    ports:
+      - "5173:5173"
+    depends_on:
+      - world-server
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  frontend-agent:
+    build:
+      context: .
+      dockerfile: apps/agent-runner/Dockerfile
+    environment:
+      AGENT_ID: frontend-agent
+      AGENT_NAME: Frontend Agent
+      AGENT_ROLE: Frontend Engineer
+      AGENT_AVATAR: hoodie
+      AGENT_COLOR: "#60a5fa"
+      AGENT_RUNTIME: mock
+      WORLD_SERVER_URL: http://world-server:3001
+    volumes:
+      - ./workspaces/frontend-agent:/workspace
+    depends_on:
+      - world-server
+
+  backend-agent:
+    build:
+      context: .
+      dockerfile: apps/agent-runner/Dockerfile
+    environment:
+      AGENT_ID: backend-agent
+      AGENT_NAME: Backend Agent
+      AGENT_ROLE: API Engineer
+      AGENT_AVATAR: robot
+      AGENT_COLOR: "#34d399"
+      AGENT_RUNTIME: mock
+      WORLD_SERVER_URL: http://world-server:3001
+    volumes:
+      - ./workspaces/backend-agent:/workspace
+    depends_on:
+      - world-server
+
+  reviewer-agent:
+    build:
+      context: .
+      dockerfile: apps/agent-runner/Dockerfile
+    environment:
+      AGENT_ID: reviewer-agent
+      AGENT_NAME: Reviewer Agent
+      AGENT_ROLE: Code Reviewer
+      AGENT_AVATAR: wizard
+      AGENT_COLOR: "#f59e0b"
+      AGENT_RUNTIME: mock
+      WORLD_SERVER_URL: http://world-server:3001
+    volumes:
+      - ./workspaces/reviewer-agent:/workspace
+    depends_on:
+      - world-server
+
+  infra-agent:
+    build:
+      context: .
+      dockerfile: apps/agent-runner/Dockerfile
+    environment:
+      AGENT_ID: infra-agent
+      AGENT_NAME: Infra Agent
+      AGENT_ROLE: DevOps Engineer
+      AGENT_AVATAR: infra
+      AGENT_COLOR: "#a78bfa"
+      AGENT_RUNTIME: mock
+      WORLD_SERVER_URL: http://world-server:3001
+    volumes:
+      - ./workspaces/infra-agent:/workspace
+    depends_on:
+      - world-server
+
+  product-agent:
+    build:
+      context: .
+      dockerfile: apps/agent-runner/Dockerfile
+    environment:
+      AGENT_ID: product-agent
+      AGENT_NAME: Product Agent
+      AGENT_ROLE: Product Strategist
+      AGENT_AVATAR: default
+      AGENT_COLOR: "#fb7185"
+      AGENT_RUNTIME: mock
+      WORLD_SERVER_URL: http://world-server:3001
+    volumes:
+      - ./workspaces/product-agent:/workspace
+    depends_on:
+      - world-server
