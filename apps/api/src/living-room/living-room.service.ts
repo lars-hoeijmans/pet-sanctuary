@@ -275,8 +275,16 @@ export class LivingRoomService implements OnModuleInit, OnModuleDestroy {
 
       await this.repository.saveMainRoom(next);
       const simulation = this.getSimulationStatus(next);
+      // Stagger the broadcast so the client can render each step. The lifecycle
+      // emits many single-tile `PetMoved` events for the walk to a desk; if they
+      // arrive in one synchronous burst the client cancels each walk tween before
+      // it renders and the pet appears frozen. A short gap per movement event lets
+      // each tile-step animate (PER_TILE walk is ~300ms on the client).
       for (const event of collected) {
         await this.publish({ snapshot: next, event, simulation });
+        if (event.type === "PetMoved") {
+          await new Promise((resolve) => setTimeout(resolve, 340));
+        }
       }
     });
   }

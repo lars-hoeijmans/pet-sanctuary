@@ -128,7 +128,20 @@ export class PetCoreWorldSource implements WorldSource {
   }
 
   createTask(title: string, description: string): void {
-    void apiCreateTask({ title, description: description || undefined, riskLevel: "low" }).catch(() => {});
+    void apiCreateTask({ title, description: description || undefined, riskLevel: "low" }).catch((error) => {
+      // Don't fail silently — surface why the task didn't get created so the user
+      // (and we) can see it instead of the button appearing to do nothing.
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("Failed to create task:", message);
+      this.handlers?.onEvent({
+        eventId: `task-create-error-${title}-${Date.now()}`,
+        ts: Date.now(),
+        type: "world.notification",
+        title: "Task creation failed",
+        severity: "error",
+        message: `Couldn't create task "${title}": ${message}`,
+      } as WorldEvent);
+    });
   }
 
   spawnTestAgent(): void {
