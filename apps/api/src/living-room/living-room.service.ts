@@ -222,38 +222,62 @@ export class LivingRoomService implements OnModuleInit, OnModuleDestroy {
   // --- Tasks & collaboration (Phase 2) -----------------------------------
 
   async createTask(request: CreateTaskRequest): Promise<CreateTaskResponse> {
-    return this.exclusive(async () => {
+    // Phase 1 (awaited) — record the task and return IMMEDIATELY so the UI shows
+    // it right away. Per PRD §10 the world only needs to record `TaskCreated`
+    // here; pets perceiving, claiming, walking to a desk, and doing the work all
+    // happen asynchronously and stream to the UI over websocket events below.
+    const { response, taskId } = await this.exclusive(async () => {
       const snapshot = await this.repository.loadMainRoom();
       if (request.assignedPetId && !snapshot.pets.some((pet) => pet.id === request.assignedPetId)) {
         throw new BadRequestException(`Assigned pet ${request.assignedPetId} does not exist.`);
       }
 
       const timestamp = new Date().toISOString();
+      const created = createTask(snapshot, request, "manager", timestamp);
+      const response = await this.persistAndPublish(created.snapshot, [created.event]);
+      return { response: { ...response, task: created.task }, taskId: created.task.id };
+    });
+
+    // Phase 2 (NOT awaited) — let pets react, claim, drive to a desk, and run the
+    // task to completion in the background. Each step is broadcast as it happens,
+    // so the room comes alive without blocking the create request.
+    void this.runTaskLifecycle(taskId).catch((error) =>
+      this.logger.error("Background task lifecycle failed", error instanceof Error ? error.stack : String(error))
+    );
+
+    return response;
+  }
+
+  /** Background driver: perceive → assign → walk to desk → work, streaming events. */
+  private async runTaskLifecycle(taskId: string): Promise<void> {
+    await this.exclusive(async () => {
+      const snapshot = await this.repository.loadMainRoom();
+      const task = getTask(snapshot, taskId);
+      if (!task) {
+        return;
+      }
+      const timestamp = new Date().toISOString();
       const collected: WorldEvent[] = [];
 
-      // 1. Record the task and let every active pet perceive it (some may claim).
-      const created = createTask(snapshot, request, "manager", timestamp);
-      let next = created.snapshot;
-      const taskId = created.task.id;
-      // processWorldEvent won't re-emit the already-present TaskCreated event, so
-      // publish it explicitly to keep the broadcast stream complete.
-      collected.push(created.event);
-
-      const processed = await processWorldEventAsync(next, created.event, timestamp, this.chooseAgentAction);
-      next = processed.snapshot;
+      // Let every active pet perceive the task (some may claim it in character).
+      const taskCreatedEvent =
+        [...snapshot.events].reverse().find((event) => event.type === "TaskCreated" && event.payload?.taskId === taskId) ??
+        snapshot.events.at(-1)!;
+      const processed = await processWorldEventAsync(snapshot, taskCreatedEvent, timestamp, this.chooseAgentAction);
+      let next = processed.snapshot;
       collected.push(...processed.events);
 
-      // 2. If nobody claimed it, assign it to the best available pet.
+      // If nobody claimed it, assign to the best available pet, then drive + run.
       next = this.ensureTaskAssigned(next, taskId, collected, timestamp);
-
-      // 3. Drive the assigned pet to a desk and run the task to completion.
       const driven = await this.driveAndRunTasks(next);
       next = driven.snapshot;
       collected.push(...driven.events);
 
-      const finalTask = getTask(next, taskId);
-      const response = await this.persistAndPublish(next, collected);
-      return { ...response, task: finalTask ?? created.task };
+      await this.repository.saveMainRoom(next);
+      const simulation = this.getSimulationStatus(next);
+      for (const event of collected) {
+        await this.publish({ snapshot: next, event, simulation });
+      }
     });
   }
 
