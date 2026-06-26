@@ -685,6 +685,10 @@ export function validatePetAction(snapshot: RoomSnapshot, petId: string, propose
       if (!pet.permissions.canMove) errors.push(`${pet.name} cannot move.`);
       if (!isInsideRoom(snapshot, { x: action.x, y: action.y })) errors.push("Move is outside the room bounds.");
       break;
+    case "move_to":
+      if (!pet.permissions.canMove) errors.push(`${pet.name} cannot move.`);
+      if (!snapshot.objects.some((object) => object.id === action.targetObjectId)) errors.push("Target object does not exist.");
+      break;
     case "work": {
       if (!pet.permissions.canWork) errors.push(`${pet.name} cannot work.`);
       const task = getTask(snapshot, action.taskId);
@@ -820,6 +824,24 @@ export function applyPetAction(
         })
       );
       break;
+    case "move_to": {
+      const targetObj = snapshot.objects.find((object) => object.id === action.targetObjectId);
+      if (targetObj) {
+        next = { ...next, pets: updatePet(next.pets, petId, { status: "moving", position: { ...targetObj.position } }) };
+        emit(
+          createWorldEvent({
+            snapshot: next,
+            type: "PetMoved",
+            timestamp,
+            actorPetId: petId,
+            payload: { from: actor.position, to: targetObj.position, targetObjectId: action.targetObjectId, reasonVisible: action.reasonVisible },
+            visibility: "room",
+            significance: "low"
+          })
+        );
+      }
+      break;
+    }
     case "work":
       next = {
         ...next,
@@ -1214,6 +1236,7 @@ function availableActionsForPet(pet: Pet): AvailableAction[] {
   const actions: Array<AvailableAction | null> = [
     pet.permissions.canSpeak ? "say" : null,
     pet.permissions.canMove ? "move" : null,
+    pet.permissions.canMove ? "move_to" : null,
     pet.permissions.canWork ? "work" : null,
     pet.permissions.canAskHelp ? "ask_help" : null,
     pet.permissions.canOfferHelp ? "offer_help" : null,

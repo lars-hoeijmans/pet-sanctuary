@@ -129,6 +129,32 @@ describe("Living Room Kernel domain", () => {
     expect(proposedByPet).not.toContain("pet-byte");
   });
 
+  it("moves a pet fully to an object with move_to action", () => {
+    const snapshot = createSeedRoomSnapshot("2026-06-26T12:00:00.000Z");
+    const mochi = snapshot.pets.find((pet) => pet.id === "pet-mochi")!;
+    const greenCouch = snapshot.objects.find((obj) => obj.id === "obj-green-couch")!;
+
+    expect(mochi.position).toEqual({ x: 2, y: 4 });
+    expect(greenCouch.position).toEqual({ x: 3, y: 5 });
+
+    const result = applyPetAction(
+      snapshot,
+      "pet-mochi",
+      {
+        action: "move_to",
+        targetObjectId: "obj-green-couch",
+        reasonVisible: "Mochi moves fully to the green couch.",
+        riskLevel: "low"
+      },
+      "2026-06-26T12:05:00.000Z"
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.snapshot.pets.find((pet) => pet.id === "pet-mochi")?.position).toEqual({ x: 3, y: 5 });
+    expect(result.event.type).toBe("PetMoved");
+    expect(result.event.payload.targetObjectId).toBe("obj-green-couch");
+  });
+
   it("keeps invalid proposed actions non-mutating and visible in the event cascade", () => {
     const snapshot = createSeedRoomSnapshot("2026-06-26T12:00:00.000Z");
     const notice = createRoomNoticeEvent(

@@ -197,6 +197,11 @@ export const MoveActionSchema = ActionBaseSchema.extend({
   y: z.number().int().nonnegative()
 });
 
+export const MoveToActionSchema = ActionBaseSchema.extend({
+  action: z.literal("move_to"),
+  targetObjectId: z.string().min(1)
+});
+
 export const WorkActionSchema = ActionBaseSchema.extend({
   action: z.literal("work"),
   taskId: z.string().min(1)
@@ -281,6 +286,7 @@ export const HandoffTaskActionSchema = ActionBaseSchema.extend({
 export const PetActionSchema = z.discriminatedUnion("action", [
   SayActionSchema,
   MoveActionSchema,
+  MoveToActionSchema,
   WorkActionSchema,
   AskHelpActionSchema,
   OfferHelpActionSchema,
@@ -300,6 +306,7 @@ export type PetAction = z.infer<typeof PetActionSchema>;
 export const AvailableActionSchema = z.enum([
   "say",
   "move",
+  "move_to",
   "work",
   "ask_help",
   "offer_help",
