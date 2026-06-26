@@ -1,0 +1,13 @@
+node_modules/
+.pnpm-store/
+dist/
+.turbo/
+.next/
+coverage/
+.env
+.env.*
+!.env.example
+*.tsbuildinfo
+
+# Generated audio assets (run `pnpm --filter @pet-sanctuary/web generate:audio` with an ElevenLabs key)
+apps/web/public/assets/audio/

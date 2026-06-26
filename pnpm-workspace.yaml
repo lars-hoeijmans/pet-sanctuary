@@ -1,0 +1,15 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+confirmModulesPurge: false
+fetchRetries: 10
+fetchTimeout: 600000
+networkConcurrency: 1
+
+onlyBuiltDependencies:
+  - esbuild
+  - sharp
+allowBuilds:
+  esbuild: true
+  sharp: true
