@@ -1,0 +1,27 @@
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# editor / os
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# claude code local settings (keep launch.json shared, ignore personal settings)
+.claude/settings.local.json
+
+# agent workspaces (created at runtime when real agents attach)
+workspaces/
+
+# env
+.env
+.env.*
+!.env.example
