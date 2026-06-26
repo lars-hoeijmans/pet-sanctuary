@@ -25,6 +25,8 @@ Recommended implementation decisions:
 5. **Use structured world descriptions, not screenshots, as the default agent perception model.** The UI can be visual and Habbo-like, but agents should reason over compact JSON/text world state. Screenshots and vision models are a stretch feature.
 6. **Make destructive behavior reversible and virtual-only in v1.** “Destroy,” “steal,” or “sabotage” can exist as toy-world actions that affect room objects and karma, not host files, real repositories, credentials, or infrastructure.
 7. **Ship audio as stretch only.** Text bubbles and event logs are enough for the demo. Voices/music can be added if the main slice is stable.
+8. **Start with the living multi-agent core, not pet generation.** The first implementation slice should prove that multiple distinct hard-coded agents can inhabit the same persistent room, observe shared state, take validated actions, and produce visible events. Pet generation should be added after this core loop exists.
+9. **Use a TypeScript monorepo with Next.js and NestJS.** The product should be built as a pnpm/Turborepo monorepo with a Next.js frontend, NestJS backend, shared TypeScript domain/contracts packages, Postgres + Drizzle, Zod validation, and a staged agent-runtime adapter.
 
 ---
 
@@ -126,6 +128,8 @@ The most important demo moment: a pet behaves in a way that matches its generate
 ---
 
 ## 8. Pet creation requirements
+
+Pet creation is important for the full hackathon demo, but it should not be the first implementation slice. The first slice can use two or three seeded pets with hard-coded traits, personalities, skills, permissions, and room positions. Once those pets can actually live inside the shared world, the creation spinner becomes a generator for the same persisted pet profile shape.
 
 ### User experience
 
@@ -436,9 +440,61 @@ Recommended:
 
 ---
 
-## 15. Containerization recommendation
+## 15. Technology and containerization recommendation
 
-### Decision
+### Application stack decision
+
+Use a TypeScript-first monorepo:
+
+- **Monorepo:** `pnpm` workspaces + Turborepo.
+- **Frontend:** Next.js App Router.
+- **Backend API:** NestJS.
+- **Worker:** a separate TypeScript/NestJS worker process once real agent jobs are introduced.
+- **Shared contracts:** Zod schemas and inferred TypeScript types.
+- **Database:** Postgres from day one.
+- **ORM/migrations:** Drizzle.
+- **Realtime:** NestJS WebSocket Gateway, using Socket.IO first for fast reconnection and client ergonomics.
+- **Queue:** BullMQ + Redis/Valkey once the worker needs durable jobs; skip this for the Living Room Kernel if the API process can run the tiny simulation loop directly.
+- **LLM structured actions:** Vercel AI SDK with strict schema outputs when agent-backed behavior begins.
+- **Agent runtime:** product-owned adapter interface with deterministic, AI SDK, Hermes, and optional Pi implementations.
+
+Do not make Next.js route handlers the main backend for the sanctuary. Next.js should own the UI/app shell. The sanctuary itself needs a long-running backend process for simulation ticks, WebSocket connections, action validation, event logging, worker dispatch, and agent-runtime calls.
+
+Do not make Hermes, Pi, LangChain, or any other agent framework the product orchestrator. The product should own the world engine and pet orchestration. Agent frameworks should sit behind a small adapter boundary.
+
+Recommended monorepo shape:
+
+```txt
+apps/
+  web/              Next.js app
+  api/              NestJS HTTP, WebSocket, and simulation loop
+  worker/           NestJS worker for agent/runtime jobs, added after slice one
+
+packages/
+  domain/           pure TypeScript world engine, pet policies, action validation
+  contracts/        Zod schemas and shared DTO types
+  db/               Drizzle schema, migrations, repositories
+  agent-runtime/    DeterministicRuntime, AiSdkRuntime, HermesRuntime, PiRuntime
+  config/           shared environment parsing
+```
+
+Agent runtime boundary:
+
+```ts
+interface AgentRuntime {
+  decideAction(input: AgentObservation): Promise<PetAction>;
+  runTask?(input: AgentTaskInput): Promise<AgentTaskResult>;
+}
+```
+
+Implement runtime support in stages:
+
+1. `DeterministicRuntime`: seeded hard-coded pet policies for the Living Room Kernel.
+2. `AiSdkRuntime`: structured LLM action generation with Zod schemas.
+3. `HermesRuntime`: real coding-agent task execution and skill growth.
+4. `PiRuntime`: optional self-modifying pet stretch path.
+
+### Containerization decision
 
 Use **one Compose stack with multiple services by concern**, but do **not** allocate one full always-on container per pet.
 
@@ -446,11 +502,11 @@ Use **one Compose stack with multiple services by concern**, but do **not** allo
 
 MVP stack:
 
-- `web`: React/Vite or Next.js frontend, or static assets served by API.
-- `api`: backend, websocket server, simulation loop, action validator.
-- `worker`: shared agent runner pool; invokes Hermes/Pi sessions for pet tasks.
-- `db`: Postgres if time allows, otherwise SQLite in an app volume for the fastest MVP.
-- `redis` or `valkey`: optional queue/pubsub; can be skipped if the API process manages a tiny queue.
+- `web`: Next.js frontend.
+- `api`: NestJS backend, websocket server, simulation loop, action validator.
+- `worker`: shared TypeScript agent runner pool; invokes Hermes/Pi sessions for pet tasks once real task execution begins.
+- `db`: Postgres.
+- `redis` or `valkey`: optional queue/pubsub for BullMQ; can be skipped until worker jobs need durability.
 - `reverse-proxy`: Caddy/Nginx for HTTPS and routing.
 
 Sandbox stack for real code/tool execution:
@@ -573,12 +629,22 @@ For a stretch “mad scientist pet that modifies its own tools”: **Pi**.
 
 - `world_engine`: authoritative room state, pathing, objects, positions.
 - `pet_orchestrator`: pet scheduling, observation building, action validation.
-- `agent_runtime`: Hermes/Pi adapter.
+- `agent_runtime`: adapter boundary for deterministic policies, AI SDK structured actions, Hermes, and optional Pi.
 - `skill_manager`: skill records, approvals, UI state.
 - `karma_engine`: karma events and consequences.
 - `safety_policy`: permissions, sandbox selection, blocked actions.
 - `event_log`: append-only trace for UI and debugging.
 - `websocket_gateway`: real-time UI updates.
+
+### TypeScript package boundaries
+
+- `packages/domain`: pure TypeScript business logic for world state, pet policies, observations, actions, and deterministic simulation. This package should not depend on NestJS, Next.js, database clients, or agent frameworks.
+- `packages/contracts`: Zod schemas and shared DTOs used by the API, worker, and web app.
+- `packages/db`: Drizzle schema, migrations, and repository helpers.
+- `packages/agent-runtime`: adapters for deterministic policies, AI SDK structured actions, Hermes, and optional Pi.
+- `packages/config`: environment parsing and shared configuration.
+
+Keep the core product logic framework-light. NestJS should wire modules together, expose HTTP/WebSocket APIs, and schedule/dispatch work; it should not become the place where all world logic is trapped.
 
 ### Data model
 
@@ -670,21 +736,75 @@ Approvals should include a short human-readable summary, not raw logs only.
 
 ## 19. Implementation plan
 
+### First implementation slice — Living Room Kernel
+
+Before building pet generation, build the smallest complete version of the product's core loop. This slice should prove that multiple distinct pets can live in one shared environment, observe the same world state, act through a constrained action schema, and leave persistent traces that the user can inspect.
+
+Scope:
+
+- Seed one room with 2-3 hard-coded pets.
+- Give each pet an id, name, traits, personality summary, speaking style, status, karma, permissions, position, and memory stub.
+- Persist room state, pet state, world objects, and an append-only event log.
+- Run a low-frequency server-side simulation tick.
+- Build compact structured observations for each pet.
+- Let each pet choose one action per tick from the MVP action set.
+- Start with deterministic policy agents before adding Hermes or LLM calls.
+- Validate every action before applying it to world state.
+- Stream state and events to a placeholder UI.
+- Provide a simple UI with a room grid, pet markers, speech bubbles, event feed, pet inspector, pause/resume, and demo reset.
+
+Acceptance criteria:
+
+- Opening the app shows one room with 2-3 existing pets.
+- Pets move, speak, idle, or offer help without direct user prompting.
+- Behavior differs based on seeded personality.
+- Clicking a pet shows its profile, state, karma, recent actions, and memories.
+- Events update live in the UI.
+- Refreshing the app preserves room state, pet state, and event history.
+- The simulation can be paused, resumed, and reset to a known demo seed.
+- No real shell, file, network, or harness access is required for this slice.
+
 ### Phase 0 — Foundation
 
-- Create repo and Compose stack.
+- Create pnpm/Turborepo monorepo.
+- Create `apps/web` as a Next.js App Router app.
+- Create `apps/api` as a NestJS app.
+- Create initial shared packages: `domain`, `contracts`, `db`, `agent-runtime`, and `config`.
+- Add Postgres and Drizzle migrations.
+- Create Docker Compose stack.
 - Deploy hello-world web app to Oracle VM.
 - Add database and websocket plumbing.
 - Build event log and room state persistence.
 
-### Phase 1 — Visual sanctuary
+### Phase 1 — Living Room Kernel
 
-- Render one room.
-- Add pet sprites and movement.
-- Add text bubbles and event feed.
-- Add pet inspector.
+- Render one room through a placeholder UI.
+- Seed 2-3 hard-coded pets with distinct personalities.
+- Add pet markers, movement, text bubbles, event feed, and pet inspector.
+- Add the simulation tick loop with deterministic pet policies.
+- Add structured observations and validated actions.
+- Persist world state, pet state, and events.
+- Add pause/resume and reset-to-seed controls.
 
-### Phase 2 — Pet creation
+### Phase 2 — Task and collaboration core
+
+- Add manager command input.
+- Create simple user-assigned tasks.
+- Let pets move to desks before working.
+- Let another pet ask for or offer help.
+- Add relationship notes or affinity as lightweight state.
+- Show task status and collaboration events in the inspector/feed.
+- Keep actions virtual and deterministic unless an agent call is explicitly enabled.
+
+### Phase 3 — Agent-backed behavior
+
+- Add optional LLM action generation for selected events through an `AiSdkRuntime`.
+- Keep deterministic policies as fallback.
+- Enforce strict JSON output schemas.
+- Treat inter-pet dialogue as untrusted content.
+- Add per-pet model/provider/runtime configuration stubs.
+
+### Phase 4 — Pet creation
 
 - Build spinner UI.
 - Generate five traits.
@@ -692,28 +812,22 @@ Approvals should include a short human-readable summary, not raw logs only.
 - Persist pet profile.
 - Spawn pet into room.
 
-### Phase 3 — Simulation loop
-
-- Add low-frequency tick scheduler.
-- Add deterministic idle/social/move actions.
-- Add agent-backed action generation for selected events.
-- Validate actions and update world.
-
-### Phase 4 — Agent runtime integration
+### Phase 5 — Agent runtime integration
 
 - Add Hermes adapter first.
 - Map pet identity to Hermes profile/config/skill directory.
 - Run one task from pet desk.
 - Stream progress to event feed.
+- Add BullMQ + Redis/Valkey if task jobs need durability or worker isolation.
 
-### Phase 5 — Skill growth and karma
+### Phase 6 — Skill growth and karma
 
 - Add skill creation/update event.
 - Show skill in pet inspector.
 - Add karma rules and visual feedback.
 - Add approval gate for risky skill/tool actions.
 
-### Phase 6 — Polish and demo script
+### Phase 7 — Polish and demo script
 
 - Create 3–5 memorable demo pets.
 - Add room decorations matching pet aesthetics.
@@ -771,7 +885,6 @@ Mitigation: structured world observations, summaries, event compression, low tic
 These do not block the MVP:
 
 - Exact visual engine: Phaser, PixiJS, Canvas, or DOM grid.
-- Exact backend language if the team has strong preference.
 - Whether each pet maps to one Hermes profile or one shared Hermes worker with pet-specific context.
 - Whether the first Pi-backed self-mutating pet makes the demo.
 - Whether voices/music are added after core flow is stable.
