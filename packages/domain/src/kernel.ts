@@ -503,11 +503,18 @@ export function classifyResponseLevel(
     return "ambient_reaction";
   }
 
-  const cadence = stableNumber(`${snapshot.room.tick}:${pet.id}:${event.id}`) % 5;
-  if (cadence === 0 && pet.permissions.canMove) {
+  // Keep the room visibly alive on quiet ticks: most pets should still do
+  // something small and in-character (a passing remark or a step) rather than
+  // sit silent. Cadence is seeded per (tick, pet, event) so it stays stable and
+  // replayable while spreading activity across pets.
+  const cadence = stableNumber(`${snapshot.room.tick}:${pet.id}:${event.id}`) % 4;
+  if (cadence === 0 && pet.permissions.canSpeak) {
+    return "social_response";
+  }
+  if (cadence === 1 && pet.permissions.canMove) {
     return "ambient_reaction";
   }
-  if (cadence === 1) {
+  if (cadence === 2) {
     return "internal_reaction";
   }
 

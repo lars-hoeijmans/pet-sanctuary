@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -36,15 +36,19 @@ export interface AgentBackendConfig {
   cwd: string;
 }
 
-let cachedCwd: string | null = null;
-function defaultCwd(): string {
-  if (cachedCwd) return cachedCwd;
+/**
+ * Each agent run gets its OWN fresh working directory. The CLIs write session/lock
+ * state into their cwd, so a shared dir makes concurrent pet calls clobber each
+ * other and fail (then silently fall back to deterministic). Isolating every call
+ * keeps parallel agents from getting in each other's way.
+ */
+function makeRunCwd(override?: string | null): string {
+  if (override) return override;
   try {
-    cachedCwd = mkdtempSync(join(tmpdir(), "pet-sanctuary-agent-"));
+    return mkdtempSync(join(tmpdir(), "pet-sanctuary-agent-"));
   } catch {
-    cachedCwd = tmpdir();
+    return tmpdir();
   }
-  return cachedCwd;
 }
 
 export function getBackendConfig(env: NodeJS.ProcessEnv = process.env): AgentBackendConfig {
@@ -56,7 +60,9 @@ export function getBackendConfig(env: NodeJS.ProcessEnv = process.env): AgentBac
     fastModel: env.SANCTUARY_AGENT_FAST_MODEL || model,
     provider: env.SANCTUARY_AGENT_PROVIDER || null,
     timeoutMs: Number(env.SANCTUARY_LLM_TIMEOUT_MS ?? 60_000),
-    cwd: env.SANCTUARY_AGENT_CWD || defaultCwd()
+    // Empty unless explicitly overridden; each agentComplete() makes its own
+    // isolated dir so concurrent pets never share CLI session state.
+    cwd: env.SANCTUARY_AGENT_CWD || ""
   };
 }
 
@@ -157,9 +163,27 @@ export async function agentComplete(prompt: string, options: CompleteOptions = {
   const model = options.fast ? cfg.fastModel : cfg.model;
   const { cmd, args } = buildArgs(prompt, model, cfg);
 
-  const { stdout } = await spawnCli(cmd, args, cfg.cwd, cfg.timeoutMs);
-  const cleaned = cleanCliOutput(stdout);
-  return cleaned.length > 0 ? cleaned : null;
+  const isolated = !cfg.cwd;
+  const runCwd = makeRunCwd(cfg.cwd);
+  const started = Date.now();
+  try {
+    const { stdout } = await spawnCli(cmd, args, runCwd, cfg.timeoutMs);
+    const cleaned = cleanCliOutput(stdout);
+    if (process.env.SANCTUARY_AGENT_DEBUG) {
+      console.warn(
+        `[agent] ${cmd} ${model} ${Date.now() - started}ms raw=${stdout.length} clean=${cleaned.length}${cleaned.length === 0 ? " EMPTY->fallback" : ""}`
+      );
+    }
+    return cleaned.length > 0 ? cleaned : null;
+  } finally {
+    if (isolated) {
+      try {
+        rmSync(runCwd, { recursive: true, force: true });
+      } catch {
+        // best-effort cleanup
+      }
+    }
+  }
 }
 
 /**

@@ -110,17 +110,21 @@ TASK
 - Risk level: ${input.riskLevel ?? "low"}
 
 Work in small, reviewable steps that fit your work style, then produce a concrete, useful
-artifact (a short script, checklist, plan, or note) and name one reusable skill this taught you.
-Keep the artifact tight and real — aim for about 8-15 lines, no filler.
+artifact (a short script, checklist, plan, or note). Keep the artifact tight and real —
+aim for about 8-15 lines, no filler.
+
+Most tasks teach NO new reusable skill — that is normal. Only name a skill if this task
+genuinely taught you something new and reusable you did not already know. Otherwise write
+"SKILL_NAME: none" and leave the SKILL_DESC/SKILL_PURPOSE lines blank.
 
 Reply EXACTLY in this format and nothing else (no markdown, no code fences). Keep every
 field except the artifact on a single line:
 STATUS: completed
 SUMMARY: <one sentence, in your voice, on what you produced>
 STEPS: <past-tense note> ;; <note> ;; <note>
-SKILL_NAME: <short name>
-SKILL_DESC: <one line>
-SKILL_PURPOSE: <why it helps future work>
+SKILL_NAME: <short name, or "none">
+SKILL_DESC: <one line, or blank>
+SKILL_PURPOSE: <why it helps future work, or blank>
 ---ARTIFACT---
 <the real deliverable as plain text, about 8-15 lines>`;
 }
@@ -166,7 +170,9 @@ export function parseTaskResponse(raw: string): ParsedTaskResponse | null {
     .slice(0, 6);
 
   const skillName = field("SKILL_NAME");
-  const learnedSkill = skillName
+  // Skills are occasional, not per-task (PRD §11): treat "none"/blank as no skill.
+  const hasSkill = !!skillName && !/^(none|n\/a|null|-)$/i.test(skillName.trim());
+  const learnedSkill = hasSkill
     ? {
         name: skillName.slice(0, 120),
         description: (field("SKILL_DESC") ?? "").slice(0, 2000),
