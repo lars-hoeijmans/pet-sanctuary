@@ -24,6 +24,7 @@ import { AgentSprite, type WorldProjector } from "./AgentSprite";
 import { CameraController } from "./CameraController";
 import { Effects } from "./Effects";
 import { findPath } from "./Pathfinding";
+import { IdleLife } from "./IdleLife";
 import { ZONES, zoneCenter } from "../world/zones";
 import { useWorldStore } from "../state/useWorldStore";
 import { sceneBus, worldBus } from "./eventBus";
@@ -38,6 +39,7 @@ export class AgentCityScene extends Phaser.Scene {
   private objects = new Map<string, Phaser.GameObjects.Container>();
   private camCtl!: CameraController;
   private projector!: WorldProjector;
+  private idleLife!: IdleLife;
   private unsubscribers: Array<() => void> = [];
 
   constructor() {
@@ -67,6 +69,14 @@ export class AgentCityScene extends Phaser.Scene {
 
     // Render whatever already happened before the scene booted.
     this.syncFromSnapshot(useWorldStore.getState().snapshot);
+
+    // Ambient liveliness: idle agents wander + chat (purely visual, always
+    // overridden by authoritative world events via notifyActivity).
+    this.idleLife = new IdleLife(this, {
+      getAgents: () => this.agents,
+      getBlocked: () => this.blockedTiles(),
+    });
+    this.idleLife.start();
 
     this.unsubscribers.push(worldBus.on("world:event", (event) => this.handleEvent(event)));
     this.unsubscribers.push(worldBus.on("world:snapshot", (snapshot) => this.syncFromSnapshot(snapshot, true)));
@@ -223,6 +233,28 @@ export class AgentCityScene extends Phaser.Scene {
   // ---- event animation ----------------------------------------------------
 
   private handleEvent(event: WorldEvent): void {
+    // Hand authoritative activity back to the event pipeline: cancel any idle
+    // ambience on the affected agent. Idle/offline heartbeats are *not* activity
+    // (they'd otherwise interrupt wandering + chatting every few seconds).
+    switch (event.type) {
+      case "agent.move":
+      case "agent.say":
+      case "agent.build":
+        this.idleLife?.notifyActivity(event.agentId);
+        break;
+      case "agent.status":
+      case "agent.heartbeat":
+        if (event.status !== "idle" && event.status !== "offline") {
+          this.idleLife?.notifyActivity(event.agentId);
+        }
+        break;
+      case "agent.skill.learned":
+        this.idleLife?.notifyActivity(event.agentId);
+        break;
+      default:
+        break;
+    }
+
     switch (event.type) {
       case "agent.register": {
         if (!this.agents.has(event.agent.id)) this.createAgentSprite(event.agent.id);
@@ -244,11 +276,16 @@ export class AgentCityScene extends Phaser.Scene {
         break;
       }
       case "agent.status": {
-        this.agents.get(event.agentId)?.setStatus(event.status);
+        if (!this.idleLife?.isBusy(event.agentId)) {
+          this.agents.get(event.agentId)?.setStatus(event.status);
+        }
         break;
       }
       case "agent.heartbeat": {
-        this.agents.get(event.agentId)?.setStatus(event.status);
+        // Don't let an idle heartbeat stomp a transient idle-chat "talking" chip.
+        if (!this.idleLife?.isBusy(event.agentId)) {
+          this.agents.get(event.agentId)?.setStatus(event.status);
+        }
         break;
       }
       case "agent.build": {
@@ -314,6 +351,7 @@ export class AgentCityScene extends Phaser.Scene {
   }
 
   private cleanup(): void {
+    this.idleLife?.stop();
     this.scale.off(Phaser.Scale.Events.RESIZE, this.handleResize, this);
     for (const unsub of this.unsubscribers) unsub();
     this.unsubscribers = [];

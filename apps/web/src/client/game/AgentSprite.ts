@@ -61,8 +61,11 @@ export class AgentSprite {
   private facing = 2;
   private moveToken = 0;
   private building = false;
+  private moving = false;
+  private currentStatus: AgentStatus;
   private readonly colorNum: number;
-  private readonly name: string;
+  readonly name: string;
+  readonly role: string;
 
   constructor(scene: Phaser.Scene, view: AgentView, projector: WorldProjector) {
     this.scene = scene;
@@ -74,6 +77,8 @@ export class AgentSprite {
     const color = Phaser.Display.Color.HexStringToColor(view.color).color;
     this.colorNum = color;
     this.name = view.name;
+    this.role = view.role;
+    this.currentStatus = view.status;
     const screen = projector.toScreen(this.gridX, this.gridY);
     this.container = scene.add.container(screen.x, screen.y);
     this.container.setData("agentId", view.id);
@@ -161,10 +166,29 @@ export class AgentSprite {
   }
 
   setStatus(status: AgentStatus): void {
+    this.currentStatus = status;
     this.statusText.setText(status);
     this.statusDot.setFillStyle(this.statusColorNum(status));
     this.recenterStatus(this.statusDot, this.statusText);
     if (status === "building") this.playBuild();
+  }
+
+  /** Current visual status. */
+  get status(): AgentStatus {
+    return this.currentStatus;
+  }
+
+  /** True while a walk animation is in flight (real or idle wander). */
+  get isMoving(): boolean {
+    return this.moving;
+  }
+
+  /** Turn to face a grid tile without moving (used for idle conversations). */
+  faceToGrid(x: number, y: number): void {
+    const facing = facingFromGridDelta(x - this.gridX, y - this.gridY);
+    if (facing === null) return;
+    this.facing = facing;
+    if (!this.building && !this.moving) this.playIdle();
   }
 
   /** Play the pickup animation once (used as the "building" gesture). */
@@ -215,6 +239,7 @@ export class AgentSprite {
 
   setGridPosImmediate(x: number, y: number): void {
     this.moveToken += 1;
+    this.moving = false;
     this.gridX = x;
     this.gridY = y;
     const screen = this.projector.toScreen(x, y);
@@ -227,13 +252,18 @@ export class AgentSprite {
     this.moveToken += 1;
     const token = this.moveToken;
     if (path.length === 0) {
+      this.moving = false;
       this.playIdle();
       return;
     }
+    this.moving = true;
 
     const stepTo = (index: number): void => {
       if (token !== this.moveToken || index >= path.length) {
-        if (token === this.moveToken) this.playIdle();
+        if (token === this.moveToken) {
+          this.moving = false;
+          this.playIdle();
+        }
         return;
       }
       const tile = path[index];
