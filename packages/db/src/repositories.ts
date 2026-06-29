@@ -92,8 +92,10 @@ export async function loadRoomSnapshot(db: SanctuaryDb, roomId: string): Promise
         description: row.description
       })
     ),
-    events: eventRows.map((row) =>
-      WorldEventSchema.parse({
+    // Skip persisted events that no longer satisfy the current schema (e.g. an
+    // event type removed from the enum) instead of crashing the whole load.
+    events: eventRows.flatMap((row) => {
+      const parsed = WorldEventSchema.safeParse({
         id: row.id,
         roomId: row.roomId,
         type: row.type,
@@ -104,8 +106,9 @@ export async function loadRoomSnapshot(db: SanctuaryDb, roomId: string): Promise
         payload: row.payload,
         visibility: row.visibility,
         significance: row.significance
-      })
-    ),
+      });
+      return parsed.success ? [parsed.data] : [];
+    }),
     tasks: taskRows.map((row) =>
       TaskSchema.parse({
         id: row.id,

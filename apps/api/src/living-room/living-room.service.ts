@@ -16,7 +16,8 @@ import {
   rollTraits,
   runAgentTickAsync
 } from "@pet-sanctuary/domain";
-import { createRuntimeWithFallback, isModelRouteEnabled } from "@pet-sanctuary/agent-runtime";
+import { createRuntimeWithFallback, deterministicTaskRun, isModelRouteEnabled } from "@pet-sanctuary/agent-runtime";
+import type { AgentTaskResult } from "@pet-sanctuary/agent-runtime";
 import type {
   AgentObservation,
   Approval,
@@ -260,18 +261,47 @@ export class LivingRoomService implements OnModuleInit, OnModuleDestroy {
       const collected: WorldEvent[] = [];
 
       // Let every active pet perceive the task (some may claim it in character).
+      // This runs the model route, which can be slow or fail; treat it as
+      // best-effort so a stalled/erroring LLM never blocks the deterministic
+      // claim + drive below. Without this guard, a failed perceive meant tasks
+      // were never claimed at all.
       const taskCreatedEvent =
         [...snapshot.events].reverse().find((event) => event.type === "TaskCreated" && event.payload?.taskId === taskId) ??
         snapshot.events.at(-1)!;
-      const processed = await processWorldEventAsync(snapshot, taskCreatedEvent, timestamp, this.chooseAgentAction);
-      let next = processed.snapshot;
-      collected.push(...processed.events);
+      let next = snapshot;
+      try {
+        const processed = await Promise.race([
+          processWorldEventAsync(snapshot, taskCreatedEvent, timestamp, this.chooseAgentAction),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("perception pass timed out after 20s")), 20_000)
+          )
+        ]);
+        next = processed.snapshot;
+        collected.push(...processed.events);
+      } catch (error) {
+        this.logger.warn(
+          `Perception pass failed for task ${taskId}; falling back to deterministic assignment: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
 
       // If nobody claimed it, assign to the best available pet, then drive + run.
       next = this.ensureTaskAssigned(next, taskId, collected, timestamp);
-      const driven = await this.driveAndRunTasks(next);
-      next = driven.snapshot;
-      collected.push(...driven.events);
+      // Drive (walk to desk) + run the task. `executeTask` invokes the agent
+      // runtime, which can throw; guard it so a failed run never discards the
+      // claim/assignment we just made — otherwise the task looks unclaimed.
+      try {
+        const driven = await this.driveAndRunTasks(next);
+        next = driven.snapshot;
+        collected.push(...driven.events);
+      } catch (error) {
+        this.logger.warn(
+          `Task drive/run failed for ${taskId}; keeping the claim and skipping work: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
 
       await this.repository.saveMainRoom(next);
       const simulation = this.getSimulationStatus(next);
@@ -343,6 +373,30 @@ export class LivingRoomService implements OnModuleInit, OnModuleDestroy {
 
   async setPetPaused(petId: string, paused: boolean): Promise<RoomResponse> {
     return this.patchPet(petId, { status: paused ? "paused" : "idle" });
+  }
+
+  async movePet(petId: string, x: number, y: number, reason: string): Promise<RoomResponse> {
+    return this.exclusive(async () => {
+      const snapshot = await this.repository.loadMainRoom();
+      const pet = snapshot.pets.find((candidate) => candidate.id === petId);
+      if (!pet) {
+        throw new NotFoundException(`Pet ${petId} not found.`);
+      }
+
+      const timestamp = new Date().toISOString();
+      const result = applyPetAction(
+        snapshot,
+        petId,
+        { action: "move", x, y, reasonVisible: reason, riskLevel: "low" },
+        timestamp
+      );
+
+      if (!result.ok) {
+        throw new BadRequestException(`Move rejected: ${result.errors.join(", ")}`);
+      }
+
+      return this.persistAndPublish(result.snapshot, result.events);
+    });
   }
 
   // --- Skills & approvals (Phase 6) --------------------------------------
@@ -513,7 +567,7 @@ export class LivingRoomService implements OnModuleInit, OnModuleDestroy {
       return snapshot;
     }
     const runtime = createRuntimeWithFallback(pet.runtime);
-    const outcome = await runtime.runTask!({
+    const input = {
       petId: pet.id,
       petName: pet.name,
       taskId: task.id,
@@ -521,7 +575,16 @@ export class LivingRoomService implements OnModuleInit, OnModuleDestroy {
       description: task.description,
       workStyle: pet.traits.workStyle,
       riskLevel: task.riskLevel
-    });
+    };
+    // The model `runTask` call has no internal timeout; a stuck call would hold
+    // the write-lock and freeze the whole room. Cap it and fall back to a
+    // deterministic run so the task always finishes and the room keeps moving.
+    const outcome = await Promise.race([
+      runtime.runTask!(input),
+      new Promise<AgentTaskResult>((resolve) =>
+        setTimeout(() => resolve(deterministicTaskRun(input)), 30_000)
+      )
+    ]);
     const result = applyTaskResult(snapshot, taskId, outcome, new Date().toISOString());
     events.push(...result.events);
     return result.snapshot;
